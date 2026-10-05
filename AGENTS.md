@@ -1,18 +1,19 @@
 # Tally → CSV sync (tally-odbc)
 
-Hand-off notes for any agent continuing this repo. Read this before changing `tallysync.py` or talking to Tally.
+Hand-off notes for any agent continuing this repo. Read this before changing Tally pull scripts or talking to Tally.
 
-**As of 5 Oct 2026.** Working path: native voucher list + per-voucher object enrich → CSV. MySQL is next, not started.
+**As of 5 Oct 2026.** Working path: native voucher list + per-voucher object enrich, plus Bills Receivable / Bills Payable reports → CSV. MySQL is next, not started.
 
 ## Goal
 
 Terminal Python sync from TallyPrime HTTP XML (`localhost:9000`) into CSV first, then the same rows into MySQL.
 
-- Command: `python tallysync.py`
-- Scope: **sales + purchase only** (not receipts, payments, journals)
+- One CLI per collection so FastAPI can `from sales import fetch` (and the same for purchase / receivables / payables)
+- Shared HTTP/XML lives in `tallylib.py` (`TallyError` instead of `sys.exit`, so a web process is not killed)
+- `python tallysync.py` still runs all four
 - No scheduler yet — run by hand
 - Stdlib only (`urllib`, `xml.etree`, `csv`, `argparse`). No `requests` / `lxml` unless asked
-- Later UI (FastAPI + React) must **read MySQL**, never call Tally per page load
+- Later UI (FastAPI + React) must **read MySQL** (or call `fetch()` on the Tally PC), never call Tally from the browser
 
 ## Hard constraints — do not violate
 
@@ -135,26 +136,34 @@ Parser: `udf_text(..., "SIVENDHIVOUKGS")` or `udf_by_index(..., "1228")`. Namesp
 
 `out/` is gitignored. Default `--out out`. If Excel has a CSV open, write fails with PermissionError — use another `--out` or close the file.
 
-| File | Grain |
-|---|---|
-| `vouchers.csv` | one row per voucher |
-| `voucher_items.csv` | inventory lines |
-| `voucher_ledgers.csv` | ledger lines |
+| File | Grain | CLI |
+|---|---|---|
+| `sales.csv` / `sales_items.csv` / `sales_ledgers.csv` | SIVENDHI BILLING | `python sales.py` |
+| `purchases.csv` / `purchases_items.csv` / `purchases_ledgers.csv` | Purchase | `python purchase.py` |
+| `receivables.csv` | open debtor bills as on `--to` | `python receivables.py` |
+| `payables.csv` | open creditor bills as on `--to` | `python payables.py` |
 
-Headers / items / ledgers field lists are at the top of `tallysync.py`.
+Field lists are in `tallylib.py`. Each module exposes `fetch()` / `save()` / `run()` for FastAPI.
+
+### Outstanding receivables / payables
+
+Native reports **`Bills Receivable`** and **`Bills Payable`** (`TYPE Data`), not voucher collections. `EXPLODEFLAG` No. As-on date is `SVCURRENTDATE` / `SVTODATE` (`--to`). Do not use report IDs `Receivables` or `Outstanding Receivables`. Do not use `TYPE Bill` (no party name) or custom `odbc_receipts`.
+
+Measured 5 Oct 2026 Agro Foods receivables: **601 bills**, 202 parties, 137 KB, ~1 s. `closing` is Tally’s signed amount; `outstanding` is absolute.
 
 CLI:
 
 ```text
-python tallysync.py
+python sales.py --from 5-Oct-2026 --to 5-Oct-2026
+python purchase.py --from 5-Oct-2026 --to 5-Oct-2026
+python receivables.py --from 1-Apr-2026 --to 5-Oct-2026
+python payables.py --from 1-Apr-2026 --to 5-Oct-2026
 python tallysync.py --from 5-Oct-2026 --to 5-Oct-2026
-python tallysync.py --from 1-Apr-2026 --to 1-Apr-2026 --out out
-python tallysync.py --url http://127.0.0.1:9000 --company "Sivendhi Agro Foods Private Limited [26-27]"
 ```
 
 `--from` defaults to today. `--to` defaults to `--from`. Date args accept `5-Oct-2026`, `2026-10-05`, `20261005`, `05/10/2026`.
 
-No `--sales-only` flag. Main always pulls sales then purchase.
+Same flags on every CLI: `--url`, `--company`, `--out`.
 
 ## Performance (measured 5 Oct 2026, Agro Foods / loaded company)
 
@@ -195,26 +204,20 @@ Old dumps under `out/` (`daybook.raw.xml` ~95 MB, `purchases.raw.xml`) came from
 
 ## Next work (not done)
 
-1. **MySQL upsert** of the same three tables; idempotent on `master_id`. Run on the Tally PC (or any host that can reach `:9000`).
+1. **MySQL upsert** per collection; idempotent on `master_id` (bills: party + bill_ref + as_on). Run on the Tally PC.
 2. Optional derive **packing** = `packing_kgs / qty` on sales lines; confirm purchase packing from native object / stock item `sivendhikgs`.
 3. Scheduler (Task Scheduler, 1–5 min, today + yesterday) only after MySQL is stable.
-4. FastAPI/React only if a screen is needed — reads DB, not Tally.
-5. Optional `--sales-only` if purchase should be skippable.
+4. FastAPI/React: import `fetch()` from `sales` / `purchase` / `receivables` / `payables`; UI should still read MySQL, not Tally, on every page load.
 
 Do not expand voucher types, add TDL collections, or fetch stock-item masters on every sync unless asked.
 
-## Code map (`tallysync.py`)
+## Code map
 
-| Function | Role |
+| File | Role |
 |---|---|
-| `tally_date` | CLI → `D-Mon-YYYY` for `$$Date` |
-| `post_xml` | HTTP POST, timeout 180 s |
-| `post_native_vouchers` | Slim dated list |
-| `post_voucher_object` | Full voucher by MasterID |
-| `sanitize_tally_xml` / `parse_root` | Make Tally XML parse |
-| `parse_voucher` | Header + items + ledgers + UDFs |
-| `collect_from_root` | Walk envelope; fallback flat-line parser unused on native objects |
-| `filter_period` | Python date safety net |
-| `enrich_from_objects` | Loop object GET |
-| `fetch_native_vouchers` | List → filter → enrich |
-| `main` | Sales then purchase → three CSVs |
+| `tallylib.py` | HTTP POST, XML sanitize/parse, voucher list+object, bills reports, CSV, `TallyError`, shared CLI flags |
+| `sales.py` | `fetch()` SIVENDHI BILLING → `out/sales*.csv` |
+| `purchase.py` | `fetch()` Purchase → `out/purchases*.csv` |
+| `receivables.py` | `fetch()` Bills Receivable → `out/receivables.csv` |
+| `payables.py` | `fetch()` Bills Payable → `out/payables.csv` |
+| `tallysync.py` | Runs all four |
