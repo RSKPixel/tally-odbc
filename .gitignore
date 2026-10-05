@@ -1,0 +1,6 @@
+out/
+out_sync/
+__pycache__/
+*.pyc
+.venv/
+venv/
