@@ -8,9 +8,9 @@ Hand-off notes for any agent continuing this repo. Read this before changing Tal
 
 Terminal Python sync from TallyPrime HTTP XML (`localhost:9000`) into CSV first, then the same rows into MySQL.
 
-- One CLI per collection so FastAPI can `from sales import fetch` (and the same for purchase / receivables / payables)
-- Shared HTTP/XML lives in `tallylib.py` (`TallyError` instead of `sys.exit`, so a web process is not killed)
-- `python tallysync.py` still runs all four
+- One CLI per collection so FastAPI can `from tallysync.sales import fetch` (same for purchase / receivables / payables)
+- Shared HTTP/XML lives in `tallysync/tallylib.py` (`TallyError` instead of `sys.exit`, so a web process is not killed)
+- `python -m tallysync` still runs all four
 - No scheduler yet — run by hand
 - Stdlib only (`urllib`, `xml.etree`, `csv`, `argparse`). No `requests` / `lxml` unless asked
 - Later UI (FastAPI + React) must **read MySQL** (or call `fetch()` on the Tally PC), never call Tally from the browser
@@ -22,7 +22,7 @@ Terminal Python sync from TallyPrime HTTP XML (`localhost:9000`) into CSV first,
 3. **Do not dump all vouchers.** Unfiltered voucher collections hang Tally and drop port 9000. Always send an actual date range in the TDL formula (see below).
 4. **Do not `FETCH *` on a voucher collection.** That emptied the collection or dropped the HTTP connection.
 5. **Do not use `$$IsPeriodValid` as the collection filter.** It returned an empty collection.
-6. **Do not switch company** unless the user asks. Default is whatever is currently loaded. `SVCURRENTCOMPANY` with the wrong name fails the request.
+6. **Do not switch company.** Use whatever is currently loaded. The web app never sends `SVCURRENTCOMPANY`. Keep only one company open in Tally; if more than one is loaded, fetch is blocked. `SVCURRENTCOMPANY` with the wrong name can hang `:9000`.
 7. **Do not invent inline collections named `MyVouchers` / `TYPE Voucher` as the main path.** Probes of `List of Vouchers` timed out and killed `:9000`.
 8. Leave TDL files in `C:\Program Files\TallyPrime\tdl` alone unless the user asks.
 
@@ -124,11 +124,13 @@ Native voucher **objects** do include these. Loaded TDL is not required for expo
 | Meaning | TDL name | Index / other | Where | CSV column |
 |---|---|---|---|---|
 | Line total kg (not bag size) | `sivendhivoukgs` / `SIVENDHIVOUKGS` | `1228` | Inventory / batch on voucher | `packing_kgs` |
-| Bag size 50 / 100 / 30 | `sivendhikgs` | stock-item UDF; Tally label **Packing** | Stock item master, not sales voucher | not joined yet |
+| Bag size 50 / 100 / 30 | `sivendhikgs` | stock-item UDF; Tally label **Packing** | Stock item master, not sales voucher | derive `packing` = kgs/qty on voucher lines |
 | Brand | `sivendhibrand` | `1212` / internal `788530365` | Inventory line | `brand` |
 | Rep / broker | `sivendhisalerepvou` | `1230` / internal `788530383` | Voucher header | `rep_or_broker` |
+| Box count (Industries / PET) | `SIVENDHI_pack` / `SIVENDHI_PACK` | `9238` | Inventory line list | `box` |
+| Pieces per box (Industries / PET) | `sivendhi_pack_qty` / `SIVENDHI_PACK_QTY` | `9239` | Inventory line list | `qty_per_box` |
 
-**Packing:** sales can derive bag size as `packing_kgs / bags` (qty) so a stock-item join is not required. That derive is **not implemented** yet. Purchase ODBC used to expose item packing as `PACKING`; native purchase object path should be checked when wiring packing.
+**Packing:** Agro Foods bag size is `packing_kgs / bags`. Industries billed qty is `N PCS` with no dual unit; box and qty_per_box come from those UDFs (`10`×`48`=`480`, `24`×`108`=`2592`, `6`×`108`=`648` on purchase 44). Do not treat piece qty as packing (that produced packing=`1`). `BASICNUMPACKAGES` was empty on that voucher. Dual-unit `Box = Nos` still parsed if Tally sends it.
 
 Parser: `udf_text(..., "SIVENDHIVOUKGS")` or `udf_by_index(..., "1228")`. Namespace tags look like `UDF:SIVENDHIVOUKGS`.
 
@@ -138,12 +140,12 @@ Parser: `udf_text(..., "SIVENDHIVOUKGS")` or `udf_by_index(..., "1228")`. Namesp
 
 | File | Grain | CLI |
 |---|---|---|
-| `sales.csv` / `sales_items.csv` / `sales_ledgers.csv` | SIVENDHI BILLING | `python sales.py` |
-| `purchases.csv` / `purchases_items.csv` / `purchases_ledgers.csv` | Purchase | `python purchase.py` |
-| `receivables.csv` | open debtor bills as on `--to` | `python receivables.py` |
-| `payables.csv` | open creditor bills as on `--to` | `python payables.py` |
+| `sales.csv` / `sales_items.csv` / `sales_ledgers.csv` | SIVENDHI BILLING | `python -m tallysync.sales` |
+| `purchases.csv` / `purchases_items.csv` / `purchases_ledgers.csv` | Purchase | `python -m tallysync.purchase` |
+| `receivables.csv` | open debtor bills as on `--to` | `python -m tallysync.receivables` |
+| `payables.csv` | open creditor bills as on `--to` | `python -m tallysync.payables` |
 
-Field lists are in `tallylib.py`. Each module exposes `fetch()` / `save()` / `run()` for FastAPI.
+Field lists are in `tallysync/tallylib.py`. Each module exposes `fetch()` / `save()` / `run()` for FastAPI.
 
 ### Outstanding receivables / payables
 
@@ -154,11 +156,11 @@ Measured 5 Oct 2026 Agro Foods receivables: **601 bills**, 202 parties, 137 KB, 
 CLI:
 
 ```text
-python sales.py --from 5-Oct-2026 --to 5-Oct-2026
-python purchase.py --from 5-Oct-2026 --to 5-Oct-2026
-python receivables.py --from 1-Apr-2026 --to 5-Oct-2026
-python payables.py --from 1-Apr-2026 --to 5-Oct-2026
-python tallysync.py --from 5-Oct-2026 --to 5-Oct-2026
+python -m tallysync.sales --from 5-Oct-2026 --to 5-Oct-2026
+python -m tallysync.purchase --from 5-Oct-2026 --to 5-Oct-2026
+python -m tallysync.receivables --from 1-Apr-2026 --to 5-Oct-2026
+python -m tallysync.payables --from 1-Apr-2026 --to 5-Oct-2026
+python -m tallysync --from 5-Oct-2026 --to 5-Oct-2026
 ```
 
 `--from` defaults to today. `--to` defaults to `--from`. Date args accept `5-Oct-2026`, `2026-10-05`, `20261005`, `05/10/2026`.
@@ -204,20 +206,30 @@ Old dumps under `out/` (`daybook.raw.xml` ~95 MB, `purchases.raw.xml`) came from
 
 ## Next work (not done)
 
-1. **MySQL upsert** per collection; idempotent on `master_id` (bills: party + bill_ref + as_on). Run on the Tally PC.
-2. Optional derive **packing** = `packing_kgs / qty` on sales lines; confirm purchase packing from native object / stock item `sivendhikgs`.
+1. Receivables / payables MySQL upsert. Sales/purchase Sync writes `tallysync_sales` / `tallysync_purchases` (never `tallydata_*`).
+2. Optional stock-item join for `sivendhikgs` if voucher UDF / bags=kgs derive is missing on a company.
 3. Scheduler (Task Scheduler, 1–5 min, today + yesterday) only after MySQL is stable.
-4. FastAPI/React: import `fetch()` from `sales` / `purchase` / `receivables` / `payables`; UI should still read MySQL, not Tally, on every page load.
+4. FastAPI + React (`backend/`, `frontend/`): login, landing (loaded Tally company), settings (Tally host/port). List screens still read MySQL later — not Tally on every page load.
 
 Do not expand voucher types, add TDL collections, or fetch stock-item masters on every sync unless asked.
 
+## App (boilerplate)
+
+- `backend/` FastAPI — session login, SQLite `app_settings` / `company_database` (company → MySQL database), `GET /api/tally/status`
+- `frontend/` Vite React Tailwind dark — `/login`, `/`, `/settings`
+- Tally default `officehq:9000`. Do not switch company. Keep one company open. Save company→database with superuser password before Sync. Sync targets `tallysync_sales` / `tallysync_purchases`.
+
+Run: `uvicorn backend.main:app --reload --host 0.0.0.0 --port 8005` and `npm run dev` in `frontend/` (Vite **5175**).
+
 ## Code map
 
-| File | Role |
+| Path | Role |
 |---|---|
-| `tallylib.py` | HTTP POST, XML sanitize/parse, voucher list+object, bills reports, CSV, `TallyError`, shared CLI flags |
-| `sales.py` | `fetch()` SIVENDHI BILLING → `out/sales*.csv` |
-| `purchase.py` | `fetch()` Purchase → `out/purchases*.csv` |
-| `receivables.py` | `fetch()` Bills Receivable → `out/receivables.csv` |
-| `payables.py` | `fetch()` Bills Payable → `out/payables.csv` |
-| `tallysync.py` | Runs all four |
+| `tallysync/tallylib.py` | HTTP POST, XML sanitize/parse, voucher list+object, bills reports, `loaded_company`, `TallyError` |
+| `tallysync/sales.py` | `fetch()` SIVENDHI BILLING → `out/sales*.csv` |
+| `tallysync/purchase.py` | `fetch()` Purchase → `out/purchases*.csv` |
+| `tallysync/receivables.py` | `fetch()` Bills Receivable → `out/receivables.csv` |
+| `tallysync/payables.py` | `fetch()` Bills Payable → `out/payables.csv` |
+| `tallysync/__main__.py` | `python -m tallysync` runs all four |
+| `backend/` | FastAPI |
+| `frontend/` | React UI |

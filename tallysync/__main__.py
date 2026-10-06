@@ -3,11 +3,8 @@
 
 from __future__ import annotations
 
-import payables
-import purchase
-import receivables
-import sales
-from tallylib import run_cli
+from tallysync import payables, purchase, receivables, sales
+from tallysync.tallylib import run_cli
 
 
 def run(url: str, company: str, from_date: str, to_date: str, out) -> None:

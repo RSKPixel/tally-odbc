@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""Bills Payable (outstanding) → CSV. Import fetch() from FastAPI later."""
+"""Bills Receivable (outstanding) → CSV. Import fetch() from FastAPI later."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from tallylib import BILL_FIELDS, fetch_bills_report, run_cli, write_csv
+from tallysync.tallylib import BILL_FIELDS, fetch_bills_report, run_cli, write_csv
 
-REPORT_ID = "Bills Payable"
+REPORT_ID = "Bills Receivable"
 
 
 def fetch(url: str, company: str, from_date: str, to_date: str) -> list[dict]:
@@ -15,7 +15,7 @@ def fetch(url: str, company: str, from_date: str, to_date: str) -> list[dict]:
 
 
 def save(out: Path, rows: list[dict]) -> Path:
-    path = out / "payables.csv"
+    path = out / "receivables.csv"
     write_csv(path, BILL_FIELDS, rows)
     return path
 
@@ -23,13 +23,13 @@ def save(out: Path, rows: list[dict]) -> Path:
 def run(url: str, company: str, from_date: str, to_date: str, out: Path) -> list[dict]:
     rows = fetch(url, company, from_date, to_date)
     path = save(out, rows)
-    print(f"Saved {len(rows)} payables as on {to_date}")
+    print(f"Saved {len(rows)} receivables as on {to_date}")
     print(f"  {path}")
     return rows
 
 
 def main() -> None:
-    run_cli("Tally native Bills Payable → CSV", run)
+    run_cli("Tally native Bills Receivable → CSV", run)
 
 
 if __name__ == "__main__":

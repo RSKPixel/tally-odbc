@@ -4,3 +4,9 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.env
+backend/.env
+backend/*.sqlite
+backend/*.db
+frontend/node_modules/
+frontend/dist/
