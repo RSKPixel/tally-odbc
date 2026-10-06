@@ -268,6 +268,16 @@ def inventory_udf_number(inv: ET.Element, *names: str) -> str:
     return ""
 
 
+def nonzero(value: str) -> str:
+    text = (value or "").strip()
+    try:
+        if text and float(text) == 0:
+            return ""
+    except ValueError:
+        return text
+    return text
+
+
 def derive_packing(qty: str, kgs: str) -> str:
     try:
         bags = float(qty)
@@ -372,11 +382,58 @@ def loaded_company(url: str, timeout: int = 15) -> str:
     return loaded_company_info(url, timeout=timeout)["company"]
 
 
+# Explicit methods only. AllInventoryEntries.* on a year of vouchers is multi-megabyte
+# and slow; FETCH * / NATIVEMETHOD * is forbidden.
+LINE_NATIVEMETHODS = (
+    "GUID",
+    "Amount",
+    "PartyGSTIN",
+    "PlaceOfSupply",
+    "Reference",
+    "ClassName",
+    "EnteredBy",
+    "IsDeleted",
+    "SIVENDHISALEREPVOU",
+    "AllInventoryEntries.StockItemName",
+    "AllInventoryEntries.BilledQty",
+    "AllInventoryEntries.ActualQty",
+    "AllInventoryEntries.Rate",
+    "AllInventoryEntries.Amount",
+    "AllInventoryEntries.GSTHSNName",
+    "AllInventoryEntries.SIVENDHIVOUKGS",
+    "AllInventoryEntries.SIVENDHIBRAND",
+    "AllInventoryEntries.SIVENDHI_PACK",
+    "AllInventoryEntries.SIVENDHI_PACK_QTY",
+    "AllInventoryEntries.BatchAllocations.GodownName",
+    "LedgerEntries.LedgerName",
+    "LedgerEntries.Amount",
+    "LedgerEntries.IsPartyLedger",
+    "LedgerEntries.BillAllocations.Name",
+    "AllLedgerEntries.LedgerName",
+    "AllLedgerEntries.Amount",
+    "AllLedgerEntries.IsPartyLedger",
+    "AllLedgerEntries.BillAllocations.Name",
+)
+
+
 def post_native_vouchers(
-    url: str, company: str, from_date: str, to_date: str, child_of: str, coll_name: str
+    url: str,
+    company: str,
+    from_date: str,
+    to_date: str,
+    child_of: str,
+    coll_name: str,
+    *,
+    lines: bool = False,
 ) -> bytes:
     # Tally ignores SVFROMDATE/SVTODATE on Vouchers:VoucherType. Inject $$Date.
     company_tag = f"        <SVCURRENTCOMPANY>{xml_escape(company)}</SVCURRENTCOMPANY>\n" if company else ""
+    extra = ""
+    if lines:
+        extra = "\n".join(
+            f"            <NATIVEMETHOD>{xml_escape(name)}</NATIVEMETHOD>" for name in LINE_NATIVEMETHODS
+        )
+        extra = f"\n{extra}"
     xml = f"""<ENVELOPE>
   <HEADER>
     <VERSION>1</VERSION>
@@ -403,7 +460,7 @@ def post_native_vouchers(
             <NATIVEMETHOD>MasterID</NATIVEMETHOD>
             <NATIVEMETHOD>VoucherNumber</NATIVEMETHOD>
             <NATIVEMETHOD>VoucherTypeName</NATIVEMETHOD>
-            <NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>
+            <NATIVEMETHOD>PartyLedgerName</NATIVEMETHOD>{extra}
           </COLLECTION>
           <SYSTEM TYPE="Formulae" NAME="TallySyncDateFilter">$Date &gt;= $$Date:"{from_date}" AND $Date &lt;= $$Date:"{to_date}"</SYSTEM>
         </TDLMESSAGE>
@@ -550,11 +607,11 @@ def parse_voucher(
         qty_raw = child_text(inv, "BILLEDQTY") or child_text(inv, "ACTUALQTY") or child_text(inv, "QTY")
         parts = parse_qty_parts(qty_raw)
         qty = parts["qty"]
-        box = parts["box"] or inventory_box_count(inv)
-        qty_per_box = parts["qty_per_box"] or inventory_udf_number(inv, "SIVENDHI_PACK_QTY", "9239")
+        box = nonzero(parts["box"] or inventory_box_count(inv))
+        qty_per_box = nonzero(parts["qty_per_box"] or inventory_udf_number(inv, "SIVENDHI_PACK_QTY", "9239"))
         if not qty_per_box and box and qty:
             qty_per_box = derive_packing(box, qty)
-        packing_kgs = money(udf_text(inv, "SIVENDHIVOUKGS") or udf_by_index(inv, "1228"))
+        packing_kgs = nonzero(money(udf_text(inv, "SIVENDHIVOUKGS") or udf_by_index(inv, "1228")))
         if not packing_kgs and not box and parts["weight"] and re.search(r"BAG|KG", qty_raw, re.I):
             packing_kgs = parts["weight"]
         items.append(
@@ -838,48 +895,77 @@ def fetch_native_vouchers(
     seen: set[str] = set()
     last_error = ""
     for name in names:
-        print(f"Native Voucher / {name}")
+        print(f"Native Voucher / {name}", flush=True)
+        added = len(headers)
         try:
-            raw = post_native_vouchers(url, company, from_date, to_date, name, "TallySyncVouchers")
-            print(f"  list {len(raw):,} bytes")
+            if enrich and seen and not _child_has_new_vouchers(
+                url, company, from_date, to_date, name, keep, default_type, seen
+            ):
+                print(f"  skip {name}: already listed", flush=True)
+                continue
+            raw = post_native_vouchers(
+                url, company, from_date, to_date, name, "TallySyncVouchers", lines=enrich
+            )
+            print(f"  list {len(raw):,} bytes", flush=True)
             root = parse_root(raw)
             err = tally_status_error(root)
             if err:
-                print(f"  skip {name}: {err}")
-                last_error = f"Tally error for {name}: {err}"
-                continue
+                raise TallyError(f"Tally error for {name}: {err}")
+            found_h, found_i, found_l = collect_from_root(root, default_type, keep)
+            before = len(found_h)
+            found_h, found_i, found_l = filter_period(found_h, found_i, found_l, from_date, to_date)
+            if before and before != len(found_h):
+                print(f"  {before} fetched, {len(found_h)} in date range", flush=True)
+            else:
+                print(f"  {len(found_h)} vouchers", flush=True)
+            _take_new(headers, items, ledgers, found_h, found_i, found_l, seen)
         except TallyError as exc:
-            print(f"  skip {name}: {exc}")
+            print(f"  skip {name}: {exc}", flush=True)
             last_error = str(exc)
+            if len(headers) != added:
+                raise
             continue
-        found_h, found_i, found_l = collect_from_root(root, default_type, keep)
-        before = len(found_h)
-        found_h, found_i, found_l = filter_period(found_h, found_i, found_l, from_date, to_date)
-        if before and before != len(found_h):
-            print(f"  {before} fetched, {len(found_h)} in date range")
-        else:
-            print(f"  {len(found_h)} vouchers")
-        new_keys: set[str] = set()
-        for header in found_h:
-            key = header["master_id"] or header["voucher_number"]
-            if not key or key in seen:
-                continue
-            seen.add(key)
-            new_keys.add(key)
-            headers.append(header)
-        items.extend(
-            row for row in found_i if (row["master_id"] or row["voucher_number"]) in new_keys
-        )
-        ledgers.extend(
-            row for row in found_l if (row["master_id"] or row["voucher_number"]) in new_keys
-        )
     if not headers and last_error:
         raise TallyError(last_error)
     if enrich and headers and not items:
-        print(f"  loading full objects for {len(headers)} vouchers")
+        print(f"  loading full objects for {len(headers)} vouchers", flush=True)
         headers, items, ledgers = enrich_from_objects(url, company, headers, default_type, keep)
-        print(f"  {len(headers)} vouchers, {len(items)} items, {len(ledgers)} ledgers")
+        print(f"  {len(headers)} vouchers, {len(items)} items, {len(ledgers)} ledgers", flush=True)
     return headers, items, ledgers
+
+
+def _child_has_new_vouchers(
+    url: str,
+    company: str,
+    from_date: str,
+    to_date: str,
+    child_of: str,
+    keep: set[str],
+    default_type: str,
+    seen: set[str],
+) -> bool:
+    raw = post_native_vouchers(url, company, from_date, to_date, child_of, "TallySyncVouchers")
+    print(f"  check {len(raw):,} bytes", flush=True)
+    root = parse_root(raw)
+    err = tally_status_error(root)
+    if err:
+        raise TallyError(f"Tally error for {child_of}: {err}")
+    found_h, _found_i, _found_l = collect_from_root(root, default_type, keep)
+    found_h, _found_i, _found_l = filter_period(found_h, _found_i, _found_l, from_date, to_date)
+    return any((header["master_id"] or header["voucher_number"]) not in seen for header in found_h)
+
+
+def _take_new(headers, items, ledgers, found_h, found_i, found_l, seen: set[str]) -> None:
+    new_keys: set[str] = set()
+    for header in found_h:
+        key = header["master_id"] or header["voucher_number"]
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        new_keys.add(key)
+        headers.append(header)
+    items.extend(row for row in found_i if (row["master_id"] or row["voucher_number"]) in new_keys)
+    ledgers.extend(row for row in found_l if (row["master_id"] or row["voucher_number"]) in new_keys)
 
 
 def iter_data_nodes(el: ET.Element):

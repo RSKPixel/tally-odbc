@@ -179,8 +179,10 @@ def replace_period(
         with conn.cursor() as cur:
             cur.execute(create_sql)
             cur.execute(f"DELETE FROM `{table}` WHERE voucher_date >= %s AND voucher_date < %s", (start_dt, end_dt))
-            for row in rows:
-                cur.execute(insert_sql, [row[name] for name in columns])
+            values = [[row[name] for name in columns] for row in rows]
+            batch = 500
+            for start_at in range(0, len(values), batch):
+                cur.executemany(insert_sql, values[start_at : start_at + batch])
         conn.commit()
     except MysqlError:
         conn.rollback()
