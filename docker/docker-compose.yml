@@ -1,0 +1,43 @@
+name: tallysync-docker
+
+services:
+  backend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.backend
+    env_file:
+      - .env
+    environment:
+      SQLITE_PATH: /data/app.sqlite
+    volumes:
+      - tallysync-data:/data
+    restart: unless-stopped
+    # MySQL and Tally run separately; MYSQL_HOST and TALLY_HOST must resolve inside this container
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8005/api/health', timeout=3)",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.frontend
+    ports:
+      - "${TALLYSYNC_PORT:-8005}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  tallysync-data:

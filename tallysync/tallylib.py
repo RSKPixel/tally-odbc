@@ -12,7 +12,7 @@ import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 DEFAULT_URL = "http://127.0.0.1:9000"
@@ -1008,6 +1008,109 @@ def parse_bills_report(root: ET.Element, as_on: str) -> list[dict]:
             current["overdue_days"] = (el.text or "").strip()
     if current and (current.get("bill_ref") or current.get("party")):
         rows.append(current)
+    return rows
+
+
+def month_periods(from_date: str, to_date: str) -> list[tuple[str, str]]:
+    """Calendar months from `from_date` through `to_date`. The last month ends on `to_date`."""
+    start = parse_row_date(from_date)
+    end = parse_row_date(to_date)
+    if not start or not end or end < start:
+        raise TallyError("Invalid profit and loss period")
+    periods: list[tuple[str, str]] = []
+    cursor = date(start.year, start.month, 1)
+    while cursor <= end:
+        if cursor.month == 12:
+            next_month = date(cursor.year + 1, 1, 1)
+        else:
+            next_month = date(cursor.year, cursor.month + 1, 1)
+        month_end = next_month - timedelta(days=1)
+        slice_start = start if cursor < start else cursor
+        slice_end = end if month_end > end else month_end
+        periods.append((tally_date(slice_start.isoformat()), tally_date(slice_end.isoformat())))
+        cursor = next_month
+    return periods
+
+
+def post_profit_loss(url: str, company: str, from_date: str, to_date: str) -> bytes:
+    # Group statement only. EXPLODEFLAG Yes is a second call; do not add a Period collection.
+    company_tag = f"        <SVCURRENTCOMPANY>{xml_escape(company)}</SVCURRENTCOMPANY>\n" if company else ""
+    xml = f"""<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Data</TYPE>
+    <ID>Profit and Loss</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+{company_tag}        <SVCURRENTDATE>{to_date}</SVCURRENTDATE>
+        <SVFROMDATE>{from_date}</SVFROMDATE>
+        <SVTODATE>{to_date}</SVTODATE>
+        <EXPLODEFLAG>No</EXPLODEFLAG>
+      </STATICVARIABLES>
+    </DESC>
+  </BODY>
+</ENVELOPE>"""
+    return post_xml(url, xml, timeout=LIST_TIMEOUT)
+
+
+def parse_profit_loss(root: ET.Element) -> list[dict]:
+    rows: list[dict] = []
+    name: str | None = None
+    for el in root.iter():
+        tag = local_name(el.tag)
+        if tag == "DSPDISPNAME":
+            name = (el.text or "").strip()
+            continue
+        if tag != "PLAMT" or name is None:
+            continue
+        sub = ""
+        main = ""
+        for child in el:
+            ctag = local_name(child.tag)
+            if ctag == "PLSUBAMT":
+                sub = (child.text or "").strip()
+            elif ctag == "BSMAINAMT":
+                main = (child.text or "").strip()
+        if main:
+            amount, side = main, "main"
+        elif sub:
+            amount, side = sub, "sub"
+        else:
+            amount, side = "", ""
+        rows.append({"account": name, "amount": amount, "amount_side": side})
+        name = None
+    return rows
+
+
+def fetch_profit_loss(url: str, company: str, from_date: str, to_date: str) -> list[dict]:
+    raw = post_profit_loss(url, company, from_date, to_date)
+    if b"Unknown Request" in raw:
+        raise TallyError("Tally error for Profit and Loss: Unknown Request")
+    root = parse_root(raw)
+    err = tally_status_error(root)
+    if err:
+        raise TallyError(f"Tally error for Profit and Loss: {err}")
+    rows = parse_profit_loss(root)
+    period_from = ymd(from_date)
+    period_to = ymd(to_date)
+    for index, row in enumerate(rows, start=1):
+        row["line_no"] = str(index)
+        row["period_from"] = period_from
+        row["period_to"] = period_to
+    return rows
+
+
+def fetch_profit_loss_months(url: str, company: str, from_date: str, to_date: str) -> list[dict]:
+    rows: list[dict] = []
+    for frm, to in month_periods(from_date, to_date):
+        print(f"Profit and Loss {frm} .. {to}", flush=True)
+        found = fetch_profit_loss(url, company, frm, to)
+        print(f"  {len(found)} lines", flush=True)
+        rows.extend(found)
     return rows
 
 

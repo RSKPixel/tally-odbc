@@ -21,8 +21,8 @@ export function Layout({ username, onLogout }: Props) {
   }
 
   return (
-    <div className="min-h-screen bg-zinc-950">
-      <header className="flex items-center justify-between border-b border-zinc-800 px-6 py-3">
+    <div className="flex h-screen w-full flex-col bg-zinc-950">
+      <header className="flex w-full items-center justify-between border-b border-zinc-800 px-[5%] py-3">
         <div className="flex items-center gap-6">
           <span className="text-sm font-semibold tracking-tight text-emerald-400">Tally sync</span>
           <nav className="flex gap-1">
@@ -45,7 +45,7 @@ export function Layout({ username, onLogout }: Props) {
           </button>
         </div>
       </header>
-      <main className="mx-auto max-w-3xl px-6 py-10">
+      <main className="flex min-h-0 w-full flex-1 flex-col p-[5%]">
         <Outlet />
       </main>
     </div>

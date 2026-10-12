@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from backend.auth import current_user
 from backend.db import get_db
 from backend.mysql import MysqlError
-from backend.mysql_sync import replace_period
+from backend.mysql_sync import replace_period, replace_pnl
 from backend.models import get_company_database, get_or_create_settings
 from tallysync import purchase, sales
 from tallysync.tallylib import (
@@ -29,6 +29,7 @@ from tallysync.tallylib import (
     post_voucher_object,
     tally_date,
     tally_status_error,
+    fetch_profit_loss_months,
 )
 
 router = APIRouter(prefix="/api/tally", tags=["tally"])
@@ -50,7 +51,13 @@ COLLECTIONS = {
         "keep": PURCHASE_TYPES,
         "line_fields": PURCHASE_LINE_FIELDS,
     },
+    "pnl": {
+        "label": "Profit and Loss (tallysync_pnl)",
+        "table": "tallysync_pnl",
+    },
 }
+
+PNL_FIELDS = ["period_from", "period_to", "line_no", "account", "amount", "amount_side"]
 
 
 class FetchBody(BaseModel):
@@ -149,6 +156,22 @@ def fetch_collections(
         spec = COLLECTIONS[name]
         started = time.perf_counter()
         try:
+            if name == "pnl":
+                lines = fetch_profit_loss_months(url, "", from_date, to_date)
+                elapsed = _elapsed_text(time.perf_counter() - started)
+                rows = [_item_row(line, PNL_FIELDS) for line in lines]
+                results.append(
+                    {
+                        "id": name,
+                        "label": spec["label"],
+                        "count": len(rows),
+                        "elapsed": elapsed,
+                        "columns": list(PNL_FIELDS),
+                        "rows": rows,
+                        "error": "",
+                    }
+                )
+                continue
             headers, _items, _ledgers = spec["fetch"](
                 url, "", from_date, to_date, enrich=False
             )
@@ -229,6 +252,20 @@ def sync_collections(
         spec = COLLECTIONS[name]
         started = time.perf_counter()
         try:
+            if name == "pnl":
+                lines = fetch_profit_loss_months(url, "", from_date, to_date)
+                count = replace_pnl(database, lines, from_date, to_date)
+                elapsed = _elapsed_text(time.perf_counter() - started)
+                results.append(
+                    {
+                        "id": name,
+                        "label": spec["label"],
+                        "count": count,
+                        "elapsed": elapsed,
+                        "error": "",
+                    }
+                )
+                continue
             _headers, items, _ledgers = spec["fetch"](
                 url, "", from_date, to_date, enrich=True
             )
@@ -281,6 +318,8 @@ def fetch_voucher(
     spec = COLLECTIONS.get(body.collection)
     if spec is None:
         raise HTTPException(status_code=400, detail=f"Unknown collection: {body.collection}")
+    if "line_fields" not in spec:
+        raise HTTPException(status_code=400, detail="This collection has no voucher lines")
     row = get_or_create_settings(db)
     url = f"http://{row.tally_host}:{row.tally_port}"
     master_id = body.master_id.strip()

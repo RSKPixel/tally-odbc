@@ -7,6 +7,15 @@ from tallysync.tallylib import parse_row_date
 
 SALES_TABLE = "tallysync_sales"
 PURCHASE_TABLE = "tallysync_purchases"
+PNL_TABLE = "tallysync_pnl"
+PNL_COLUMNS = [
+    "period_from",
+    "period_to",
+    "line_no",
+    "account",
+    "amount",
+    "amount_side",
+]
 SALES_COLUMNS = [
     "voucher_no",
     "voucher_date",
@@ -82,6 +91,18 @@ CREATE TABLE IF NOT EXISTS `tallysync_purchases` (
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
 """,
+    PNL_TABLE: """
+CREATE TABLE IF NOT EXISTS `tallysync_pnl` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `period_from` datetime DEFAULT NULL,
+  `period_to` datetime DEFAULT NULL,
+  `line_no` double DEFAULT NULL,
+  `account` text,
+  `amount` double DEFAULT NULL,
+  `amount_side` text,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+""",
 }
 
 
@@ -144,6 +165,56 @@ def _purchase_row(item: dict) -> dict:
         "box": _number(item.get("box")),
         "qty_per_box": _number(item.get("qty_per_box")),
     }
+
+
+def _pnl_row(item: dict) -> dict:
+    return {
+        "period_from": _when(item.get("period_from")),
+        "period_to": _when(item.get("period_to")),
+        "line_no": _number(item.get("line_no")),
+        "account": _text(item.get("account")),
+        "amount": _number(item.get("amount")),
+        "amount_side": _text(item.get("amount_side")),
+    }
+
+
+def replace_pnl(database: str, rows: list[dict], from_date: str, to_date: str) -> int:
+    """Replace Profit and Loss lines whose period_from sits in [from_date, to_date]."""
+    if not valid_database_name(database):
+        raise MysqlError("Invalid database name")
+    start = parse_row_date(from_date)
+    end = parse_row_date(to_date)
+    if start is None or end is None:
+        raise MysqlError("Invalid sync dates")
+    start_dt = datetime(start.year, start.month, start.day)
+    end_dt = datetime(end.year, end.month, end.day) + timedelta(days=1)
+    mapped = [_pnl_row(item) for item in rows]
+    placeholders = ", ".join(["%s"] * len(PNL_COLUMNS))
+    column_sql = ", ".join(PNL_COLUMNS)
+    insert_sql = f"INSERT INTO `{PNL_TABLE}` ({column_sql}) VALUES ({placeholders})"
+
+    conn = mysql_connect(database)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(CREATE_TABLES[PNL_TABLE])
+            cur.execute(
+                f"DELETE FROM `{PNL_TABLE}` WHERE period_from >= %s AND period_from < %s",
+                (start_dt, end_dt),
+            )
+            values = [[row[name] for name in PNL_COLUMNS] for row in mapped]
+            batch = 500
+            for start_at in range(0, len(values), batch):
+                cur.executemany(insert_sql, values[start_at : start_at + batch])
+        conn.commit()
+    except MysqlError:
+        conn.rollback()
+        raise
+    except Exception as exc:
+        conn.rollback()
+        raise MysqlError(str(exc)) from exc
+    finally:
+        conn.close()
+    return len(mapped)
 
 
 def replace_period(

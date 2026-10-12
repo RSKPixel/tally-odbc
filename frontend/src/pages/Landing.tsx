@@ -85,12 +85,13 @@ export function Landing() {
   }
 
   return (
-    <div>
+    <div className="flex min-h-0 flex-1 flex-col">
       {error ? <p className="text-sm text-red-400">{error}</p> : null}
       {!status && !error ? <p className="text-sm text-zinc-500">Checking Tally…</p> : null}
       {status ? (
         <>
-          <div className="rounded-2xl border border-zinc-800 bg-zinc-900/50 p-8">
+          <div className="grid h-full min-h-0 flex-1 grid-cols-2 items-stretch gap-6">
+          <div className="h-full rounded-2xl border border-zinc-800 bg-zinc-900/50 p-6">
             <p className="text-xs uppercase tracking-wider text-zinc-500">Tally server</p>
             <p className="mt-1 font-mono text-sm text-zinc-300">{status.url}</p>
             {status.online ? (
@@ -152,6 +153,7 @@ export function Landing() {
             toDate={status.to_date}
             databaseReady={databaseReady}
           />
+          </div>
         </>
       ) : null}
       {askPassword ? (

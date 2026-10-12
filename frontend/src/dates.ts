@@ -1,4 +1,13 @@
-const DATE_KEYS = new Set(["date", "from_date", "to_date", "bill_date", "due_date", "as_on"]);
+const DATE_KEYS = new Set([
+  "date",
+  "from_date",
+  "to_date",
+  "bill_date",
+  "due_date",
+  "as_on",
+  "period_from",
+  "period_to",
+]);
 
 export function formatDate(value: string): string {
   const raw = (value || "").trim();

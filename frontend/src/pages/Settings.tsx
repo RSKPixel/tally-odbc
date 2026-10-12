@@ -88,7 +88,7 @@ export function Settings({ onProfileSaved }: Props) {
     }`;
 
   return (
-    <div>
+    <div className="w-full">
       <h1 className="text-2xl font-semibold text-white">Settings</h1>
       <div className="mt-8 overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/40">
         <div role="tablist" className="flex border-b border-zinc-800">

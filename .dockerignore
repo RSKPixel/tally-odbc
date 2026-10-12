@@ -1,0 +1,14 @@
+.git
+.venv
+venv
+**/__pycache__
+**/*.pyc
+frontend/node_modules
+frontend/dist
+out
+out_sync
+backend/.env
+docker/.env
+backend/*.sqlite
+backend/*.db
+**/.DS_Store

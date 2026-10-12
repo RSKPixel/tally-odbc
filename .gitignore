@@ -6,6 +6,7 @@ __pycache__/
 venv/
 .env
 backend/.env
+docker/.env
 backend/*.sqlite
 backend/*.db
 frontend/node_modules/

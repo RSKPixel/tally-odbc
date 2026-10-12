@@ -119,7 +119,7 @@ export function FetchCard({ online, fromDate: tallyFrom, toDate: tallyTo, databa
 
   return (
     <>
-      <div className="mt-6 rounded-2xl border border-zinc-800 bg-zinc-900/50 p-8">
+      <div className="flex h-full flex-col rounded-2xl border border-zinc-800 bg-zinc-900/50 p-6">
         <form onSubmit={(event) => void submit(event)} autoComplete="off" className="space-y-6">
           <div className="flex flex-wrap gap-4">
             {collections.map((row) => (
