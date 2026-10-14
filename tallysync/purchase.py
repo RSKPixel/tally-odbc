@@ -5,12 +5,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from tallysync.tallylib import PURCHASE_TYPE, PURCHASE_TYPES, fetch_native_vouchers, run_cli, write_voucher_csvs
+from tallysync.tallylib import (
+    PURCHASE_TYPE,
+    PURCHASE_TYPES,
+    fetch_daybook_vouchers,
+    fetch_native_vouchers,
+    run_cli,
+    write_voucher_csvs,
+)
 
 
 def fetch(
     url: str, company: str, from_date: str, to_date: str, *, enrich: bool = True
 ) -> tuple[list[dict], list[dict], list[dict]]:
+    if not enrich:
+        return fetch_daybook_vouchers(url, from_date, to_date, PURCHASE_TYPES, PURCHASE_TYPE, "Purchase")
     return fetch_native_vouchers(
         url,
         company,
@@ -20,6 +29,7 @@ def fetch(
         PURCHASE_TYPE,
         PURCHASE_TYPES,
         enrich=enrich,
+        label="Purchase",
     )
 
 

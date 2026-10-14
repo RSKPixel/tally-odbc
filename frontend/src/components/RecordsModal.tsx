@@ -51,6 +51,82 @@ export function RecordsModal({ result, onClose }: Props) {
     }
   }
 
+  if (result.id === "stocksummary") {
+    const numeric = new Set([
+      "conversion",
+      "opening_alt",
+      "opening_rate",
+      "opening_value",
+      "inwards_alt",
+      "inward_rate",
+      "inward_value",
+      "outwards_alt",
+      "outward_rate",
+      "outward_value",
+      "closing_alt",
+      "closing_rate",
+      "closing_value",
+    ]);
+    return (
+      <div className="fixed inset-0 z-50 bg-black/70" onClick={onClose}>
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="records-title"
+          className="flex h-full w-full flex-col bg-zinc-950"
+          onClick={(event) => event.stopPropagation()}
+        >
+          <div className="flex items-center justify-between border-b border-zinc-800 px-[5%] py-3">
+            <h2 id="records-title" className="text-sm font-medium text-white">
+              {result.label} · {result.count}
+            </h2>
+            <button type="button" className="text-sm text-zinc-400 hover:text-zinc-100" onClick={onClose}>
+              Close
+            </button>
+          </div>
+          <div className="min-h-0 flex-1 overflow-auto p-[5%]">
+            {result.rows.length === 0 ? (
+              <p className="text-sm text-zinc-500">No records</p>
+            ) : (
+              <table className="min-w-full text-left text-sm">
+                <thead className="sticky top-0 bg-zinc-900">
+                  <tr>
+                    {result.columns.map((column) => (
+                      <th
+                        key={column}
+                        className={`whitespace-nowrap px-3 py-2 font-medium capitalize text-zinc-400 ${
+                          numeric.has(column) ? "text-right" : ""
+                        }`}
+                      >
+                        {heading(column)}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.rows.map((row, index) => (
+                    <tr key={`${row.stock_item}-${index}`} className="border-t border-zinc-800">
+                      {result.columns.map((column) => (
+                        <td
+                          key={column}
+                          className={`whitespace-nowrap px-3 py-2 text-zinc-200 ${
+                            numeric.has(column) ? "text-right font-mono" : ""
+                          }`}
+                        >
+                          {formatDateCell(column, row[column] || "")}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   if (result.id === "pnl") {
     const months: { key: string; from: string; to: string; lines: Record<string, string>[] }[] = [];
     for (const row of result.rows) {
@@ -190,7 +266,12 @@ export function RecordsModal({ result, onClose }: Props) {
                     <thead className="sticky top-0 bg-zinc-900">
                       <tr>
                         {items.columns.map((column) => (
-                          <th key={column} className="whitespace-nowrap px-3 py-2 font-medium capitalize text-zinc-400">
+                          <th
+                            key={column}
+                            className={`whitespace-nowrap px-3 py-2 font-medium capitalize text-zinc-400 ${
+                              column === "qty_alt" || column === "conversion" ? "text-right" : ""
+                            }`}
+                          >
                             {heading(column)}
                           </th>
                         ))}
@@ -200,7 +281,12 @@ export function RecordsModal({ result, onClose }: Props) {
                       {items.items.map((row, index) => (
                         <tr key={`${row.master_id}-${row.stock_item}-${index}`} className="border-t border-zinc-800">
                           {items.columns.map((column) => (
-                            <td key={column} className="whitespace-nowrap px-3 py-2 text-zinc-200">
+                            <td
+                              key={column}
+                              className={`whitespace-nowrap px-3 py-2 text-zinc-200 ${
+                                column === "qty_alt" || column === "conversion" ? "text-right font-mono" : ""
+                              }`}
+                            >
                               {formatDateCell(column, row[column] || "")}
                             </td>
                           ))}

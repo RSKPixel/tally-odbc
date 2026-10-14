@@ -11,7 +11,8 @@ import sys
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from contextvars import ContextVar, Token
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -73,10 +74,14 @@ ITEM_FIELDS = [
 ]
 SALES_LINE_FIELDS = [
     "item_no",
+    "stock_group",
     "stock_item",
     "brand",
     "packing",
     "qty",
+    "qty_alt",
+    "alternate_unit",
+    "conversion",
     "rate",
     "amount",
     "discount",
@@ -126,6 +131,28 @@ BILL_FIELDS = [
 
 class TallyError(RuntimeError):
     pass
+
+
+class TallyDropped(TallyError):
+    """Tally closed the HTTP connection before the export finished."""
+
+
+_progress_cb: ContextVar[Callable[[str], None] | None] = ContextVar("tally_progress", default=None)
+
+
+def emit_progress(message: str) -> None:
+    print(message, flush=True)
+    callback = _progress_cb.get()
+    if callback is not None:
+        callback(message)
+
+
+def bind_progress(callback: Callable[[str], None]) -> Token:
+    return _progress_cb.set(callback)
+
+
+def reset_progress(token: Token) -> None:
+    _progress_cb.reset(token)
 
 
 def tally_date(value: str) -> str:
@@ -205,7 +232,13 @@ def parse_qty_parts(qty_text: str) -> dict:
     text = (qty_text or "").strip()
     bags = re.search(r"([\d.]+)\s*BAGS?\s*=\s*([\d.]+)\s*KGS?", text, re.I)
     if bags:
-        return {"qty": bags.group(1), "weight": bags.group(2), "box": "", "qty_per_box": ""}
+        return {
+            "qty": bags.group(1),
+            "weight": bags.group(2),
+            "alt_qty": bags.group(2),
+            "box": "",
+            "qty_per_box": "",
+        }
     box_to_pcs = re.search(
         r"([\d.]+)\s*(BOX(?:ES)?|CARTONS?|PKGS?|PACKAGES?)\s*=\s*([\d.]+)\s*(NOS|PCS|NUMBERS?|PIECES?)",
         text,
@@ -213,7 +246,7 @@ def parse_qty_parts(qty_text: str) -> dict:
     )
     if box_to_pcs:
         box, qty = box_to_pcs.group(1), box_to_pcs.group(3)
-        return {"qty": qty, "weight": qty, "box": box, "qty_per_box": derive_packing(box, qty)}
+        return {"qty": qty, "weight": qty, "alt_qty": "", "box": box, "qty_per_box": derive_packing(box, qty)}
     pcs_to_box = re.search(
         r"([\d.]+)\s*(NOS|PCS|NUMBERS?|PIECES?)\s*=\s*([\d.]+)\s*(BOX(?:ES)?|CARTONS?|PKGS?|PACKAGES?)",
         text,
@@ -221,11 +254,11 @@ def parse_qty_parts(qty_text: str) -> dict:
     )
     if pcs_to_box:
         qty, box = pcs_to_box.group(1), pcs_to_box.group(3)
-        return {"qty": qty, "weight": qty, "box": box, "qty_per_box": derive_packing(box, qty)}
+        return {"qty": qty, "weight": qty, "alt_qty": "", "box": box, "qty_per_box": derive_packing(box, qty)}
     n = first_number(text)
     if n and not re.search(r"BAG|KG", text, re.I):
-        return {"qty": n, "weight": n, "box": "", "qty_per_box": ""}
-    return {"qty": n, "weight": "", "box": "", "qty_per_box": ""}
+        return {"qty": n, "weight": n, "alt_qty": "", "box": "", "qty_per_box": ""}
+    return {"qty": n, "weight": "", "alt_qty": "", "box": "", "qty_per_box": ""}
 
 
 def inventory_box_count(inv: ET.Element) -> str:
@@ -306,9 +339,16 @@ def post_xml(url: str, xml: str, timeout: int = 180) -> bytes:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read()
-    except (TimeoutError, ConnectionError, http.client.RemoteDisconnected) as exc:
-        raise TallyError(f"Tally timed out or dropped the connection at {url}") from exc
+    except TimeoutError as exc:
+        raise TallyError(f"Tally timed out at {url}") from exc
+    except (ConnectionError, http.client.RemoteDisconnected, http.client.IncompleteRead) as exc:
+        raise TallyDropped(f"Tally dropped the connection at {url}") from exc
     except urllib.error.URLError as exc:
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, TimeoutError):
+            raise TallyError(f"Tally timed out at {url}") from exc
+        if isinstance(reason, (ConnectionError, http.client.RemoteDisconnected)):
+            raise TallyDropped(f"Tally dropped the connection at {url}") from exc
         raise TallyError(f"Tally not reachable at {url}: {exc}") from exc
 
 
@@ -623,6 +663,7 @@ def parse_voucher(
                 "hsn": child_text(inv, "GSTHSNNAME"),
                 "hsn_desc": child_text(inv, "GSTHSNDESCRIPTION"),
                 "qty": qty,
+                "qty_alt": parts.get("alt_qty", ""),
                 "weight": packing_kgs or parts["weight"],
                 "rate": first_number(child_text(inv, "RATE")),
                 "amount": abs_amount(money(child_text(inv, "AMOUNT") or child_text(inv, "VALUE"))),
@@ -876,6 +917,188 @@ def enrich_from_objects(
     return full_headers, items, ledgers
 
 
+def _date_spans(from_date: str, to_date: str, span_days: int = 15) -> list[tuple[str, str]]:
+    start = parse_row_date(from_date)
+    end = parse_row_date(to_date)
+    if not start or not end or end < start:
+        raise TallyError("Invalid date range")
+    spans: list[tuple[str, str]] = []
+    cursor = start
+    while cursor <= end:
+        chunk_end = min(end, cursor + timedelta(days=span_days - 1))
+        spans.append((tally_date(cursor.isoformat()), tally_date(chunk_end.isoformat())))
+        cursor = chunk_end + timedelta(days=1)
+    return spans
+
+
+def _type_filter_formula(types: set[str]) -> str:
+    parts = [f'$VoucherTypeName = "{xml_escape(name)}"' for name in sorted(types)]
+    if not parts:
+        raise TallyError("No voucher types to fetch")
+    return " OR ".join(parts)
+
+
+def post_voucher_register(url: str, from_day: str, to_day: str, type_formula: str) -> bytes:
+    """Voucher Register for a date range. Day Book returns only the current date."""
+    xml = f"""<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Data</TYPE>
+    <ID>Voucher Register</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        <SVFROMDATE>{xml_escape(from_day)}</SVFROMDATE>
+        <SVTODATE>{xml_escape(to_day)}</SVTODATE>
+        <EXPLODEFLAG>No</EXPLODEFLAG>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <REPORT NAME="Voucher Register" ISMODIFY="Yes">
+            <LOCAL>Collection : Default : Add : Filter : VchTypeFilter</LOCAL>
+            <LOCAL>Collection : Default : Add : Fetch : VoucherTypeName</LOCAL>
+          </REPORT>
+          <SYSTEM TYPE="Formulae" NAME="VchTypeFilter">{type_formula}</SYSTEM>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>"""
+    return post_xml(url, xml, timeout=LIST_TIMEOUT)
+
+
+def _register_header(el: ET.Element, default_type: str, keep_types: set[str]) -> dict | None:
+    vtype = normalize_vtype(child_text(el, "VOUCHERTYPENAME") or attr(el, "VCHTYPE") or default_type)
+    if not type_kept(vtype, keep_types):
+        return None
+    number = child_text(el, "VOUCHERNUMBER")
+    master_id = child_text(el, "MASTERID").strip()
+    if not number and not master_id:
+        return None
+    stock_lines = 0
+    for inv in iter_named_any(el, "ALLINVENTORYENTRIES.LIST", "INVENTORYENTRIES.LIST"):
+        if (child_text(inv, "STOCKITEMNAME") or child_text(inv, "ITEM")).strip():
+            stock_lines += 1
+    rep = ""
+    for child in el:
+        tag = local_name(child.tag).upper()
+        if "SIVENDHISALEREPVOU" not in tag and "788530383" not in tag:
+            continue
+        rep = (child.text or "").strip()
+        if not rep:
+            for nested in child:
+                rep = (nested.text or "").strip()
+                if rep:
+                    break
+        if rep:
+            break
+    return {
+        "master_id": master_id,
+        "guid": child_text(el, "GUID") or attr(el, "REMOTEID"),
+        "date": ymd(child_text(el, "DATE")),
+        "voucher_type": vtype,
+        "voucher_number": number,
+        "party": child_text(el, "PARTYLEDGERNAME") or child_text(el, "PARTYNAME") or child_text(el, "LEDGERNAME"),
+        "party_gstin": child_text(el, "PARTYGSTIN"),
+        "place_of_supply": child_text(el, "PLACEOFSUPPLY"),
+        "reference": child_text(el, "REFERENCE"),
+        "class_name": child_text(el, "CLASSNAME"),
+        "rep_or_broker": rep or child_text(el, "SALEREP") or child_text(el, "REPNAME"),
+        "entered_by": child_text(el, "ENTEREDBY"),
+        "is_deleted": child_text(el, "ISDELETED") or "No",
+        "bill_amount": "",
+        "raw_amount": "",
+        "stock_lines": stock_lines,
+    }
+
+
+def _parse_register_headers(
+    raw: bytes,
+    frm: str,
+    to: str,
+    default_type: str,
+    keep_types: set[str],
+) -> list[dict]:
+    root = parse_root(raw)
+    err = tally_status_error(root)
+    if err:
+        raise TallyError(f"Tally error for Voucher Register {frm} .. {to}: {err}")
+    found: list[dict] = []
+    for el in root.iter():
+        if local_name(el.tag) != "VOUCHER":
+            continue
+        if not (attr(el, "VCHTYPE") or child_text(el, "VOUCHERNUMBER") or child_text(el, "MASTERID")):
+            continue
+        header = _register_header(el, default_type, keep_types)
+        if header:
+            found.append(header)
+    found, _items, _ledgers = filter_period(found, [], [], frm, to)
+    return found
+
+
+def _read_register(url: str, frm: str, to: str, formula: str) -> bytes:
+    """One Voucher Register span. A dropped connection is tried once more."""
+    try:
+        return post_voucher_register(url, frm, to, formula)
+    except TallyDropped:
+        emit_progress(f"Ign {frm} .. {to} connection dropped, retrying")
+        return post_voucher_register(url, frm, to, formula)
+
+
+def _collect_register_span(
+    url: str,
+    frm: str,
+    to: str,
+    formula: str,
+    default_type: str,
+    keep_types: set[str],
+    headers: list[dict],
+    seen: set[str],
+    label: str,
+) -> None:
+    try:
+        raw = _read_register(url, frm, to, formula)
+    except TallyDropped:
+        start = parse_row_date(frm)
+        end = parse_row_date(to)
+        if not start or not end or start >= end:
+            raise
+        half = max(1, (end - start).days // 2)
+        mid = start + timedelta(days=half)
+        if mid >= end:
+            mid = end - timedelta(days=1)
+        left_to = tally_date(mid.isoformat())
+        right_from = tally_date((mid + timedelta(days=1)).isoformat())
+        emit_progress(f"Ign {frm} .. {to} connection dropped, splitting at {left_to}")
+        _collect_register_span(url, frm, left_to, formula, default_type, keep_types, headers, seen, label)
+        _collect_register_span(url, right_from, to, formula, default_type, keep_types, headers, seen, label)
+        return
+    found = _parse_register_headers(raw, frm, to, default_type, keep_types)
+    before = len(headers)
+    _take_new(headers, [], [], found, [], [], seen)
+    emit_progress(f"{label}:1 {frm} .. {to} [{len(headers) - before} vouchers]")
+
+
+def fetch_daybook_vouchers(
+    url: str,
+    from_date: str,
+    to_date: str,
+    keep_types: set[str],
+    default_type: str,
+    label: str,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Voucher headers in 15-day Voucher Register calls."""
+    formula = _type_filter_formula(keep_types)
+    headers: list[dict] = []
+    seen: set[str] = set()
+    for frm, to in _date_spans(from_date, to_date):
+        _collect_register_span(url, frm, to, formula, default_type, keep_types, headers, seen, label)
+    return headers, [], []
+
+
 def fetch_native_vouchers(
     url: str,
     company: str,
@@ -886,8 +1109,10 @@ def fetch_native_vouchers(
     keep_types: set[str] | None = None,
     *,
     enrich: bool = True,
+    label: str = "",
 ) -> tuple[list[dict], list[dict], list[dict]]:
     keep = keep_types or {default_type}
+    shown = label or default_type
     names = [child_of] if isinstance(child_of, str) else list(child_of)
     headers: list[dict] = []
     items: list[dict] = []
@@ -895,32 +1120,26 @@ def fetch_native_vouchers(
     seen: set[str] = set()
     last_error = ""
     for name in names:
-        print(f"Native Voucher / {name}", flush=True)
         added = len(headers)
         try:
             if enrich and seen and not _child_has_new_vouchers(
                 url, company, from_date, to_date, name, keep, default_type, seen
             ):
-                print(f"  skip {name}: already listed", flush=True)
+                emit_progress(f"Ign {name} already listed")
                 continue
             raw = post_native_vouchers(
                 url, company, from_date, to_date, name, "TallySyncVouchers", lines=enrich
             )
-            print(f"  list {len(raw):,} bytes", flush=True)
             root = parse_root(raw)
             err = tally_status_error(root)
             if err:
                 raise TallyError(f"Tally error for {name}: {err}")
             found_h, found_i, found_l = collect_from_root(root, default_type, keep)
-            before = len(found_h)
             found_h, found_i, found_l = filter_period(found_h, found_i, found_l, from_date, to_date)
-            if before and before != len(found_h):
-                print(f"  {before} fetched, {len(found_h)} in date range", flush=True)
-            else:
-                print(f"  {len(found_h)} vouchers", flush=True)
+            emit_progress(f"{shown}:1 {from_date} .. {to_date} [{len(found_h)} vouchers]")
             _take_new(headers, items, ledgers, found_h, found_i, found_l, seen)
         except TallyError as exc:
-            print(f"  skip {name}: {exc}", flush=True)
+            emit_progress(f"Err {name}: {exc}")
             last_error = str(exc)
             if len(headers) != added:
                 raise
@@ -928,9 +1147,9 @@ def fetch_native_vouchers(
     if not headers and last_error:
         raise TallyError(last_error)
     if enrich and headers and not items:
-        print(f"  loading full objects for {len(headers)} vouchers", flush=True)
+        emit_progress(f"  loading full objects for {len(headers)} vouchers")
         headers, items, ledgers = enrich_from_objects(url, company, headers, default_type, keep)
-        print(f"  {len(headers)} vouchers, {len(items)} items, {len(ledgers)} ledgers", flush=True)
+        emit_progress(f"  {len(headers)} vouchers, {len(items)} items, {len(ledgers)} ledgers")
     return headers, items, ledgers
 
 
@@ -945,7 +1164,7 @@ def _child_has_new_vouchers(
     seen: set[str],
 ) -> bool:
     raw = post_native_vouchers(url, company, from_date, to_date, child_of, "TallySyncVouchers")
-    print(f"  check {len(raw):,} bytes", flush=True)
+    emit_progress(f"  check {len(raw):,} bytes")
     root = parse_root(raw)
     err = tally_status_error(root)
     if err:
@@ -1104,12 +1323,216 @@ def fetch_profit_loss(url: str, company: str, from_date: str, to_date: str) -> l
     return rows
 
 
+def post_stock_summary(url: str, company: str, from_date: str, to_date: str) -> bytes:
+    # Item rows with opening, inwards, outwards, and closing. No Period collection.
+    company_tag = f"        <SVCURRENTCOMPANY>{xml_escape(company)}</SVCURRENTCOMPANY>\n" if company else ""
+    xml = f"""<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Data</TYPE>
+    <ID>Stock Summary</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+{company_tag}        <SVFROMDATE>{from_date}</SVFROMDATE>
+        <SVTODATE>{to_date}</SVTODATE>
+        <ISITEMWISE>Yes</ISITEMWISE>
+        <DSPSHOWOPENING>Yes</DSPSHOWOPENING>
+        <DSPSHOWINWARDS>Yes</DSPSHOWINWARDS>
+        <DSPSHOWOUTWARDS>Yes</DSPSHOWOUTWARDS>
+        <DSPSHOWCLOSING>Yes</DSPSHOWCLOSING>
+      </STATICVARIABLES>
+    </DESC>
+  </BODY>
+</ENVELOPE>"""
+    return post_xml(url, xml, timeout=LIST_TIMEOUT)
+
+
+def parse_stock_summary(root: ET.Element) -> list[dict]:
+    qty_tags = {
+        "DSPOPQTY": "opening",
+        "DSPINQTY": "inwards",
+        "DSPOUTQTY": "outwards",
+        "DSPCLQTY": "closing",
+    }
+    rate_tags = {
+        "DSPOPRATE": "opening_rate",
+        "DSPINRATE": "inward_rate",
+        "DSPOUTRATE": "outward_rate",
+        "DSPCLRATE": "closing_rate",
+    }
+    value_tags = {
+        "DSPOPAMTA": "opening_value",
+        "DSPDRAMTA": "inward_value",
+        "DSPNETTCRAMTA": "outward_value",
+        "DSPCLAMTA": "closing_value",
+    }
+    blank = {
+        "stock_item": "",
+        "opening": "",
+        "opening_rate": "",
+        "opening_value": "",
+        "inwards": "",
+        "inward_rate": "",
+        "inward_value": "",
+        "outwards": "",
+        "outward_rate": "",
+        "outward_value": "",
+        "closing": "",
+        "closing_rate": "",
+        "closing_value": "",
+    }
+    rows: list[dict] = []
+    current: dict | None = None
+    for el in root.iter():
+        tag = local_name(el.tag)
+        if tag == "DSPDISPNAME":
+            if current and current.get("stock_item"):
+                rows.append(current)
+            current = dict(blank)
+            current["stock_item"] = (el.text or "").strip()
+            continue
+        if current is None:
+            continue
+        text = money(el.text or "")
+        if tag in qty_tags:
+            current[qty_tags[tag]] = (el.text or "").strip()
+        elif tag in rate_tags:
+            current[rate_tags[tag]] = text
+        elif tag in value_tags:
+            current[value_tags[tag]] = text
+    if current and current.get("stock_item"):
+        rows.append(current)
+    return rows
+
+
+def _alt_qty(qty_text: str, conversion: str, denominator: str) -> str:
+    bags = first_number(qty_text)
+    if not bags:
+        return ""
+    try:
+        factor = float(conversion)
+        den = float(denominator) if denominator else 1.0
+    except ValueError:
+        return ""
+    if factor == 0 or den == 0:
+        return ""
+    value = float(bags) * factor / den
+    if value.is_integer():
+        return str(int(value))
+    return f"{value:.2f}"
+
+
+def fetch_stock_item_groups(url: str) -> dict[str, dict]:
+    xml = """<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>TallySyncStockParents</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="TallySyncStockParents" ISINITIALIZE="Yes">
+            <TYPE>Stock Item</TYPE>
+            <NATIVEMETHOD>Name</NATIVEMETHOD>
+            <NATIVEMETHOD>Parent</NATIVEMETHOD>
+            <NATIVEMETHOD>BaseUnits</NATIVEMETHOD>
+            <NATIVEMETHOD>AdditionalUnits</NATIVEMETHOD>
+            <NATIVEMETHOD>Conversion</NATIVEMETHOD>
+            <NATIVEMETHOD>Denominator</NATIVEMETHOD>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>"""
+    raw = post_xml(url, xml, timeout=LIST_TIMEOUT)
+    if b"Unknown Request" in raw:
+        raise TallyError("Tally error for stock item groups: Unknown Request")
+    root = parse_root(raw)
+    err = tally_status_error(root)
+    if err:
+        raise TallyError(f"Tally error for stock item groups: {err}")
+    groups: dict[str, dict] = {}
+    for el in root.iter():
+        if local_name(el.tag) != "STOCKITEM":
+            continue
+        name = attr(el, "NAME") or child_text(el, "NAME")
+        if not name:
+            continue
+        unit = child_text(el, "ADDITIONALUNITS")
+        if unit.lower() in {"", "not applicable"}:
+            unit = ""
+        groups[name] = {
+            "stock_group": child_text(el, "PARENT"),
+            "alternate_unit": unit,
+            "conversion": child_text(el, "CONVERSION").strip(),
+            "denominator": child_text(el, "DENOMINATOR").strip(),
+        }
+    return groups
+
+
+def attach_alternate_qty(url: str, items: list[dict]) -> None:
+    """Attach stock group and unit. Packing is the stock item conversion. qty_alt is the kg side of BILLEDQTY."""
+    if not items:
+        return
+    groups = fetch_stock_item_groups(url)
+    for item in items:
+        master = groups.get(item.get("stock_item") or "", {})
+        unit = master.get("alternate_unit", "")
+        conversion = master.get("conversion", "")
+        item["stock_group"] = master.get("stock_group", "")
+        item["alternate_unit"] = unit
+        item["conversion"] = conversion if unit else ""
+        if item["conversion"]:
+            item["packing"] = item["conversion"]
+        item["qty_alt"] = item.get("qty_alt") or ""
+
+
+def fetch_stock_summary(url: str, company: str, from_date: str, to_date: str) -> list[dict]:
+    raw = post_stock_summary(url, company, from_date, to_date)
+    if b"Unknown Request" in raw:
+        raise TallyError("Tally error for Stock Summary: Unknown Request")
+    root = parse_root(raw)
+    err = tally_status_error(root)
+    if err:
+        raise TallyError(f"Tally error for Stock Summary: {err}")
+    rows = parse_stock_summary(root)
+    groups = fetch_stock_item_groups(url)
+    period_from = ymd(from_date)
+    period_to = ymd(to_date)
+    for index, row in enumerate(rows, start=1):
+        master = groups.get(row["stock_item"], {})
+        conversion = master.get("conversion", "")
+        denominator = master.get("denominator", "")
+        row["line_no"] = str(index)
+        row["stock_group"] = master.get("stock_group", "")
+        row["alternate_unit"] = master.get("alternate_unit", "")
+        row["conversion"] = conversion if row["alternate_unit"] else ""
+        row["opening_alt"] = _alt_qty(row["opening"], conversion, denominator)
+        row["inwards_alt"] = _alt_qty(row["inwards"], conversion, denominator)
+        row["outwards_alt"] = _alt_qty(row["outwards"], conversion, denominator)
+        row["closing_alt"] = _alt_qty(row["closing"], conversion, denominator)
+        row["period_from"] = period_from
+        row["period_to"] = period_to
+    emit_progress(f"Stock Summary:1 {from_date} .. {to_date} [{len(rows)} lines]")
+    return rows
+
+
 def fetch_profit_loss_months(url: str, company: str, from_date: str, to_date: str) -> list[dict]:
     rows: list[dict] = []
     for frm, to in month_periods(from_date, to_date):
-        print(f"Profit and Loss {frm} .. {to}", flush=True)
         found = fetch_profit_loss(url, company, frm, to)
-        print(f"  {len(found)} lines", flush=True)
+        emit_progress(f"Profit and Loss:1 {frm} .. {to} [{len(found)} lines]")
         rows.extend(found)
     return rows
 
@@ -1143,8 +1566,14 @@ def write_voucher_csvs(
     voucher_path = out / f"{prefix}.csv"
     items_path = out / f"{prefix}_items.csv"
     ledgers_path = out / f"{prefix}_ledgers.csv"
+    item_fields = list(ITEM_FIELDS)
+    if prefix == "sales":
+        item_at = item_fields.index("stock_item")
+        item_fields.insert(item_at, "stock_group")
+        qty_at = item_fields.index("qty") + 1
+        item_fields[qty_at:qty_at] = ["qty_alt", "alternate_unit", "conversion"]
     write_csv(voucher_path, VOUCHER_FIELDS, headers)
-    write_csv(items_path, ITEM_FIELDS, items)
+    write_csv(items_path, item_fields, items)
     write_csv(ledgers_path, LEDGER_FIELDS, ledgers)
     return voucher_path, items_path, ledgers_path
 

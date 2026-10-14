@@ -14,6 +14,8 @@ export type FetchResult = {
   id: string;
   label: string;
   count: number;
+  vouchers?: number;
+  lines?: number;
   elapsed: string;
   columns: string[];
   rows: Record<string, string>[];
@@ -80,11 +82,14 @@ export const api = {
     }),
   tallyStatus: () => request<TallyStatus>("/api/tally/status"),
   collections: () => request<CollectionInfo[]>("/api/tally/collections"),
-  fetchCollections: (body: { collections: string[]; from_date: string; to_date: string }) =>
-    request<FetchResponse>("/api/tally/fetch", {
+  fetchCollections: (body: { collections: string[]; from_date: string; to_date: string; full_fetch: boolean }) =>
+    request<{ job_id: string }>("/api/tally/fetch", {
       method: "POST",
       body: JSON.stringify(body),
     }),
+  job: (jobId: string) => request<FetchResponse & { job_id: string; status: string }>(`/api/tally/jobs/${jobId}`),
+  syncJob: (jobId: string) =>
+    request<{ ok: boolean }>(`/api/tally/jobs/${jobId}/sync`, { method: "POST" }),
   voucherItems: (collection: string, master_id: string) =>
     request<VoucherItems>("/api/tally/voucher", {
       method: "POST",
@@ -95,14 +100,6 @@ export const api = {
   saveMysqlBinding: (body: { database: string; password: string }) =>
     request<{ company: string; database: string }>("/api/mysql/binding", {
       method: "PUT",
-      body: JSON.stringify(body),
-    }),
-  syncCollections: (body: { collections: string[]; from_date: string; to_date: string }) =>
-    request<{
-      database: string;
-      results: { id: string; label: string; count: number; elapsed: string; error: string }[];
-    }>("/api/tally/sync", {
-      method: "POST",
       body: JSON.stringify(body),
     }),
 };

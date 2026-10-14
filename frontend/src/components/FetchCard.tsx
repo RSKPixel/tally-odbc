@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api, CollectionInfo, FetchResult } from "../api";
 import { Field } from "./Field";
+import { FetchTerminal } from "./FetchTerminal";
 import { RecordsModal } from "./RecordsModal";
 
 function todayIso() {
@@ -17,18 +18,47 @@ function clampDate(value: string, min?: string, max?: string) {
   return value;
 }
 
+function defaultToDate(tallyFrom?: string, tallyTo?: string) {
+  return clampDate(todayIso(), tallyFrom, tallyTo);
+}
+
+function addDays(iso: string, days: number) {
+  const [y, m, d] = iso.split("-").map(Number);
+  const dt = new Date(y, (m || 1) - 1, d || 1);
+  dt.setDate(dt.getDate() + days);
+  const yy = dt.getFullYear();
+  const mm = String(dt.getMonth() + 1).padStart(2, "0");
+  const dd = String(dt.getDate()).padStart(2, "0");
+  return `${yy}-${mm}-${dd}`;
+}
+
+function amountLabel(row: { id?: string; count: number; vouchers?: number; lines?: number }) {
+  if (row.vouchers != null && row.lines != null && (row.id === "sales" || row.id === "purchase")) {
+    const voucherWord = row.vouchers === 1 ? "voucher" : "vouchers";
+    const lineWord = row.lines === 1 ? "line" : "lines";
+    return `${row.vouchers} ${voucherWord} · ${row.lines} ${lineWord}`;
+  }
+  const word = row.count === 1 ? "line" : "lines";
+  return `${row.count} ${word}`;
+}
+
 type Props = { online: boolean; fromDate?: string; toDate?: string; databaseReady: boolean };
 
-export function FetchCard({ online, fromDate: tallyFrom, toDate: tallyTo, databaseReady }: Props) {
+export function FetchCard({ online, fromDate: tallyFrom, toDate: tallyTo }: Props) {
   const [collections, setCollections] = useState<CollectionInfo[]>([]);
   const [selected, setSelected] = useState<Record<string, boolean>>({});
   const [fromDate, setFromDate] = useState(() => clampDate(tallyFrom || todayIso(), tallyFrom, tallyTo));
-  const [toDate, setToDate] = useState(() => clampDate(tallyTo || todayIso(), tallyFrom, tallyTo));
+  const [toDate, setToDate] = useState(() => defaultToDate(tallyFrom, tallyTo));
+  const [fullFetch, setFullFetch] = useState(false);
   const [results, setResults] = useState<FetchResult[]>([]);
   const [open, setOpen] = useState<FetchResult | null>(null);
   const [error, setError] = useState("");
-  const [syncNote, setSyncNote] = useState("");
-  const [busy, setBusy] = useState<"fetch" | "sync" | "">("");
+  const [terminal, setTerminal] = useState<{
+    collections: string[];
+    from_date: string;
+    to_date: string;
+    full_fetch: boolean;
+  } | null>(null);
 
   useEffect(() => {
     api
@@ -42,7 +72,7 @@ export function FetchCard({ online, fromDate: tallyFrom, toDate: tallyTo, databa
 
   useEffect(() => {
     if (tallyFrom) setFromDate((prev) => clampDate(prev || tallyFrom, tallyFrom, tallyTo));
-    if (tallyTo) setToDate((prev) => clampDate(prev || tallyTo, tallyFrom, tallyTo));
+    if (tallyFrom || tallyTo) setToDate(defaultToDate(tallyFrom, tallyTo));
   }, [tallyFrom, tallyTo]);
 
   function changeFrom(value: string) {
@@ -57,6 +87,8 @@ export function FetchCard({ online, fromDate: tallyFrom, toDate: tallyTo, databa
     setFromDate((prev) => (prev && next && next < prev ? next : prev));
   }
 
+  const shownFrom = fullFetch ? fromDate : clampDate(toDate ? addDays(toDate, -14) : fromDate, tallyFrom, toDate);
+
   async function submit(event: FormEvent) {
     event.preventDefault();
     const names = collections.filter((row) => selected[row.id]).map((row) => row.id);
@@ -64,57 +96,14 @@ export function FetchCard({ online, fromDate: tallyFrom, toDate: tallyTo, databa
       setError("Select a collection");
       return;
     }
-    setBusy("fetch");
     setError("");
-    setSyncNote("");
     setResults([]);
-    try {
-      const body = await api.fetchCollections({
-        collections: names,
-        from_date: fromDate,
-        to_date: toDate,
-      });
-      setResults(body.results);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Fetch failed");
-    } finally {
-      setBusy("");
-    }
-  }
-
-  async function sync() {
-    const names = collections.filter((row) => selected[row.id]).map((row) => row.id);
-    if (!names.length) {
-      setError("Select a collection");
-      return;
-    }
-    if (!databaseReady) {
-      setError("Save a MySQL database first");
-      return;
-    }
-    setBusy("sync");
-    setError("");
-    setSyncNote("");
-    try {
-      const body = await api.syncCollections({
-        collections: names,
-        from_date: fromDate,
-        to_date: toDate,
-      });
-      const failed = body.results.find((row) => row.error);
-      if (failed) {
-        setError(failed.error);
-      }
-      setSyncNote(
-        body.results
-          .map((row) => (row.error ? `${row.label}: ${row.error}` : `${row.label} ${row.count} lines (${row.elapsed})`))
-          .join(" · "),
-      );
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Sync failed");
-    } finally {
-      setBusy("");
-    }
+    setTerminal({
+      collections: names,
+      from_date: fromDate,
+      to_date: toDate,
+      full_fetch: fullFetch,
+    });
   }
 
   return (
@@ -137,6 +126,21 @@ export function FetchCard({ online, fromDate: tallyFrom, toDate: tallyTo, databa
               </label>
             ))}
           </div>
+          <label className="flex items-center gap-2 text-sm text-zinc-300">
+            <input
+              type="checkbox"
+              checked={fullFetch}
+              onChange={(event) => setFullFetch(event.target.checked)}
+              autoComplete="new-password"
+              data-1p-ignore
+              data-lpignore="true"
+              className="size-4 rounded border-zinc-600 bg-zinc-900 text-emerald-600"
+            />
+            Full fetch
+          </label>
+          <p className="text-sm text-zinc-500">
+            {fullFetch ? "Selected period, 15 days at a time." : "Last 15 days through the To date."}
+          </p>
           <div className="grid max-w-md grid-cols-2 gap-4">
             <Field
               id="from_date"
@@ -145,8 +149,9 @@ export function FetchCard({ online, fromDate: tallyFrom, toDate: tallyTo, databa
               lang="en-IN"
               min={tallyFrom || undefined}
               max={toDate || tallyTo || undefined}
-              value={fromDate}
+              value={shownFrom}
               onChange={(e) => changeFrom(e.target.value)}
+              disabled={!fullFetch}
               required
             />
             <Field
@@ -162,29 +167,13 @@ export function FetchCard({ online, fromDate: tallyFrom, toDate: tallyTo, databa
             />
           </div>
           {error ? <p className="text-sm text-red-400">{error}</p> : null}
-          {syncNote ? <p className="text-sm text-emerald-400">{syncNote}</p> : null}
           <div className="flex flex-wrap gap-3">
             <button
               type="submit"
-              disabled={Boolean(busy) || !online}
+              disabled={!online || Boolean(terminal)}
               className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-60"
             >
-              {busy === "fetch" ? "Fetching…" : "Fetch"}
-            </button>
-            <button
-              type="button"
-              disabled={Boolean(busy) || !online || !results.length || !databaseReady}
-              title={
-                !databaseReady
-                  ? "Select and save a MySQL database first"
-                  : !results.length
-                    ? "Fetch records first"
-                    : undefined
-              }
-              onClick={() => void sync()}
-              className="rounded-lg border border-emerald-600 px-4 py-2 text-sm font-medium text-emerald-300 hover:bg-emerald-600/10 disabled:opacity-60"
-            >
-              {busy === "sync" ? "Syncing…" : "Sync"}
+              Fetch
             </button>
           </div>
         </form>
@@ -211,7 +200,7 @@ export function FetchCard({ online, fromDate: tallyFrom, toDate: tallyTo, databa
                           onClick={() => setOpen(row)}
                           className="text-emerald-400 hover:text-emerald-300"
                         >
-                          {row.count} {row.count === 1 ? "record" : "records"}
+                          {amountLabel(row)}
                         </button>
                       )}
                     </td>
@@ -224,6 +213,13 @@ export function FetchCard({ online, fromDate: tallyFrom, toDate: tallyTo, databa
         ) : null}
       </div>
       {open ? <RecordsModal result={open} onClose={() => setOpen(null)} /> : null}
+      {terminal ? (
+        <FetchTerminal
+          request={terminal}
+          onClose={() => setTerminal(null)}
+          onResults={setResults}
+        />
+      ) : null}
     </>
   );
 }

@@ -1,17 +1,31 @@
 from __future__ import annotations
 
 import argparse
+import json
+import threading
 import time
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from backend.auth import current_user
 from backend.db import get_db
 from backend.mysql import MysqlError
-from backend.mysql_sync import replace_period, replace_pnl
+from backend.mysql_sync import replace_period, replace_pnl, replace_stock_summary
 from backend.models import get_company_database, get_or_create_settings
+from backend.progress import (
+    claim_sync,
+    create_job,
+    iter_events,
+    job_meta,
+    load_result,
+    publish,
+    set_status,
+    store_result,
+)
 from tallysync import purchase, sales
 from tallysync.tallylib import (
     PURCHASE_LINE_FIELDS,
@@ -22,14 +36,19 @@ from tallysync.tallylib import (
     SALES_TYPES,
     TallyError,
     VOUCHER_DISPLAY_FIELDS,
+    attach_alternate_qty,
+    bind_progress,
     collect_from_root,
+    emit_progress,
     loaded_company_info,
     parse_root,
     parse_row_date,
     post_voucher_object,
+    reset_progress,
     tally_date,
     tally_status_error,
     fetch_profit_loss_months,
+    fetch_stock_summary,
 )
 
 router = APIRouter(prefix="/api/tally", tags=["tally"])
@@ -55,15 +74,42 @@ COLLECTIONS = {
         "label": "Profit and Loss (tallysync_pnl)",
         "table": "tallysync_pnl",
     },
+    "stocksummary": {
+        "label": "Stock Summary (tallysync_stocksummary)",
+        "table": "tallysync_stocksummary",
+    },
 }
 
 PNL_FIELDS = ["period_from", "period_to", "line_no", "account", "amount", "amount_side"]
+STOCK_FIELDS = [
+    "stock_group",
+    "stock_item",
+    "alternate_unit",
+    "conversion",
+    "opening",
+    "opening_alt",
+    "opening_rate",
+    "opening_value",
+    "inwards",
+    "inwards_alt",
+    "inward_rate",
+    "inward_value",
+    "outwards",
+    "outwards_alt",
+    "outward_rate",
+    "outward_value",
+    "closing",
+    "closing_alt",
+    "closing_rate",
+    "closing_value",
+]
 
 
 class FetchBody(BaseModel):
     collections: list[str] = Field(min_length=1)
     from_date: str = Field(min_length=1)
     to_date: str = Field(min_length=1)
+    full_fetch: bool = False
 
 
 class VoucherBody(BaseModel):
@@ -84,6 +130,22 @@ def _loaded_company(url: str) -> dict:
     if len(names) > 1:
         raise HTTPException(status_code=400, detail="Keep only one company open in Tally")
     return info
+
+
+def _apply_fetch_window(from_date: str, to_date: str, full_fetch: bool, info: dict) -> tuple[str, str]:
+    """Full fetch keeps the selected period. Otherwise keep the last 15 days through To."""
+    if full_fetch:
+        return from_date, to_date
+    end = parse_row_date(to_date)
+    if end is None:
+        return from_date, to_date
+    start = end - timedelta(days=14)
+    period_start = parse_row_date(info.get("from_date", ""))
+    if period_start and start < period_start:
+        start = period_start
+    if start > end:
+        start = end
+    return tally_date(start.isoformat()), to_date
 
 
 def _in_tally_period(from_date: str, to_date: str, info: dict) -> None:
@@ -129,8 +191,152 @@ def list_collections(_user: str = Depends(current_user)):
 def fetch_collections(
     body: FetchBody,
     _user: str = Depends(current_user),
-    db: Session = Depends(get_db),
 ):
+    unknown = [name for name in body.collections if name not in COLLECTIONS]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"Unknown collection: {unknown[0]}")
+    job_id = create_job(_user, body.model_dump())
+    threading.Thread(target=_fetch_worker, args=(job_id,), daemon=True).start()
+    return {"job_id": job_id}
+
+
+@router.get("/jobs/{job_id}")
+def job_status(job_id: str, _user: str = Depends(current_user)):
+    meta = _owned_job(job_id, _user)
+    result = load_result(job_id) or {}
+    return {"job_id": job_id, "status": meta.get("status") or "", **result}
+
+
+@router.get("/jobs/{job_id}/events")
+def job_events(job_id: str, _user: str = Depends(current_user)):
+    _owned_job(job_id, _user)
+    return StreamingResponse(
+        iter_events(job_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("/jobs/{job_id}/sync")
+def job_sync(job_id: str, _user: str = Depends(current_user)):
+    _owned_job(job_id, _user)
+    if not claim_sync(job_id):
+        raise HTTPException(status_code=409, detail="Fetch is not waiting for sync")
+    threading.Thread(target=_sync_worker, args=(job_id,), daemon=True).start()
+    return {"ok": True}
+
+
+def _owned_job(job_id: str, user: str) -> dict:
+    meta = job_meta(job_id)
+    if not meta or meta.get("user") != user:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return meta
+
+
+def _line_kind(text: str) -> str:
+    if text.startswith("Err"):
+        return "err"
+    if text.startswith("Hit:"):
+        return "hit"
+    if text.startswith("Get:"):
+        return "get"
+    if text.startswith("Ign"):
+        return "ign"
+    return "info"
+
+
+def _session():
+    from backend import db as database
+
+    if database.SessionLocal is None:
+        database.init_engine()
+    return database.SessionLocal()
+
+
+def _fetch_worker(job_id: str) -> None:
+    meta = job_meta(job_id) or {}
+    body = FetchBody(**json.loads(meta.get("payload") or "{}"))
+    token = bind_progress(lambda line: publish(job_id, _line_kind(line), line))
+    db = _session()
+    try:
+        publish(job_id, "cmd", "fetch")
+        publish(job_id, "info", "Reading package lists...")
+        result = _perform_fetch(db, body)
+        store_result(job_id, result)
+        for row in result["results"]:
+            if row.get("error"):
+                publish(job_id, "err", f"Err {row['label']}: {row['error']}")
+                continue
+            if row.get("vouchers") is not None:
+                publish(
+                    job_id,
+                    "ok",
+                    f"Fetched {row['vouchers']} vouchers, {row['lines']} lines — {row['label']} ({row['elapsed']})",
+                )
+            else:
+                publish(job_id, "ok", f"Fetched {row['count']} lines — {row['label']} ({row['elapsed']})")
+        labels = " ".join(row["label"] for row in result["results"] if not row.get("error"))
+        publish(job_id, "info", "The following collections will be synced:")
+        publish(job_id, "info", f"  {labels}")
+        publish(job_id, "info", "After this operation, rows in this period are replaced.")
+        publish(job_id, "prompt", "Do you want to continue? [Y/n]")
+        set_status(job_id, "prompt")
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else "Fetch failed"
+        publish(job_id, "err", f"Err {detail}")
+        publish(job_id, "error", detail)
+        set_status(job_id, "error")
+    except Exception as exc:
+        publish(job_id, "err", f"Err {exc}")
+        publish(job_id, "error", str(exc))
+        set_status(job_id, "error")
+    finally:
+        reset_progress(token)
+        db.close()
+
+
+def _sync_worker(job_id: str) -> None:
+    meta = job_meta(job_id) or {}
+    body = FetchBody(**json.loads(meta.get("payload") or "{}"))
+    token = bind_progress(lambda line: publish(job_id, _line_kind(line), line))
+    db = _session()
+    try:
+        publish(job_id, "cmd", "sync")
+        publish(job_id, "info", "Reading package lists...")
+        result = _perform_sync(db, body)
+        store_result(job_id, result)
+        for row in result["results"]:
+            if row.get("error"):
+                publish(job_id, "err", f"Err {row['label']}: {row['error']}")
+                continue
+            if row.get("vouchers") is not None:
+                publish(job_id, "info", f"Unpacking {row['label']} ({row['lines']} lines) ...")
+                publish(
+                    job_id,
+                    "ok",
+                    f"Setting up {row['label']} ({row['vouchers']} vouchers, {row['lines']} lines) ...",
+                )
+            else:
+                publish(job_id, "info", f"Unpacking {row['label']} ({row['count']} lines) ...")
+                publish(job_id, "ok", f"Setting up {row['label']} ({row['count']} lines) ...")
+        publish(job_id, "ok", "done.")
+        publish(job_id, "done", "done.")
+        set_status(job_id, "done")
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, str) else "Sync failed"
+        publish(job_id, "err", f"Err {detail}")
+        publish(job_id, "error", detail)
+        set_status(job_id, "error")
+    except Exception as exc:
+        publish(job_id, "err", f"Err {exc}")
+        publish(job_id, "error", str(exc))
+        set_status(job_id, "error")
+    finally:
+        reset_progress(token)
+        db.close()
+
+
+def _perform_fetch(db: Session, body: FetchBody) -> dict:
     unknown = [name for name in body.collections if name not in COLLECTIONS]
     if unknown:
         raise HTTPException(status_code=400, detail=f"Unknown collection: {unknown[0]}")
@@ -149,7 +355,10 @@ def fetch_collections(
     except TallyError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     company = info["company"]
+    emit_progress(f"Hit:1 {url} {company}")
+    emit_progress("Reading state information...")
     _in_tally_period(from_date, to_date, info)
+    from_date, to_date = _apply_fetch_window(from_date, to_date, body.full_fetch, info)
 
     results = []
     for name in seen:
@@ -172,6 +381,22 @@ def fetch_collections(
                     }
                 )
                 continue
+            if name == "stocksummary":
+                lines = fetch_stock_summary(url, "", from_date, to_date)
+                elapsed = _elapsed_text(time.perf_counter() - started)
+                rows = [_item_row(line, STOCK_FIELDS) for line in lines]
+                results.append(
+                    {
+                        "id": name,
+                        "label": spec["label"],
+                        "count": len(rows),
+                        "elapsed": elapsed,
+                        "columns": list(STOCK_FIELDS),
+                        "rows": rows,
+                        "error": "",
+                    }
+                )
+                continue
             headers, _items, _ledgers = spec["fetch"](
                 url, "", from_date, to_date, enrich=False
             )
@@ -182,6 +407,8 @@ def fetch_collections(
                     "id": name,
                     "label": spec["label"],
                     "count": len(rows),
+                    "vouchers": len(rows),
+                    "lines": sum(int(header.get("stock_lines") or 0) for header in headers),
                     "elapsed": elapsed,
                     "columns": list(DISPLAY_FIELDS),
                     "rows": rows,
@@ -217,12 +444,7 @@ def fetch_collections(
     return {"company": company, "from_date": from_date, "to_date": to_date, "results": results}
 
 
-@router.post("/sync")
-def sync_collections(
-    body: FetchBody,
-    _user: str = Depends(current_user),
-    db: Session = Depends(get_db),
-):
+def _perform_sync(db: Session, body: FetchBody) -> dict:
     unknown = [name for name in body.collections if name not in COLLECTIONS]
     if unknown:
         raise HTTPException(status_code=400, detail=f"Unknown collection: {unknown[0]}")
@@ -241,7 +463,10 @@ def sync_collections(
     except TallyError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     company = info["company"]
+    emit_progress(f"Hit:1 {url} {company}")
+    emit_progress("Reading state information...")
     _in_tally_period(from_date, to_date, info)
+    from_date, to_date = _apply_fetch_window(from_date, to_date, body.full_fetch, info)
     binding = get_company_database(db, company)
     if not binding or not binding.mysql_database:
         raise HTTPException(status_code=400, detail="Select and save a MySQL database")
@@ -266,7 +491,21 @@ def sync_collections(
                     }
                 )
                 continue
-            _headers, items, _ledgers = spec["fetch"](
+            if name == "stocksummary":
+                lines = fetch_stock_summary(url, "", from_date, to_date)
+                count = replace_stock_summary(database, lines, from_date, to_date)
+                elapsed = _elapsed_text(time.perf_counter() - started)
+                results.append(
+                    {
+                        "id": name,
+                        "label": spec["label"],
+                        "count": count,
+                        "elapsed": elapsed,
+                        "error": "",
+                    }
+                )
+                continue
+            headers, items, _ledgers = spec["fetch"](
                 url, "", from_date, to_date, enrich=True
             )
             count = replace_period(database, name, items, from_date, to_date)
@@ -276,6 +515,8 @@ def sync_collections(
                     "id": name,
                     "label": spec["label"],
                     "count": count,
+                    "vouchers": len(headers),
+                    "lines": count,
                     "elapsed": elapsed,
                     "error": "",
                 }
@@ -331,6 +572,8 @@ def fetch_voucher(
         if err:
             raise TallyError(err)
         _headers, items, _ledgers = collect_from_root(root, spec["voucher_type"], spec["keep"])
+        if body.collection == "sales":
+            attach_alternate_qty(url, items)
     except TallyError as exc:
         fields = list(spec["line_fields"])
         return {

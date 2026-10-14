@@ -9,6 +9,8 @@ from tallysync.tallylib import (
     SALES_CHILDOF,
     SALES_TYPE,
     SALES_TYPES,
+    attach_alternate_qty,
+    fetch_daybook_vouchers,
     fetch_native_vouchers,
     run_cli,
     write_voucher_csvs,
@@ -18,9 +20,13 @@ from tallysync.tallylib import (
 def fetch(
     url: str, company: str, from_date: str, to_date: str, *, enrich: bool = True
 ) -> tuple[list[dict], list[dict], list[dict]]:
-    return fetch_native_vouchers(
-        url, company, from_date, to_date, SALES_CHILDOF, SALES_TYPE, SALES_TYPES, enrich=enrich
+    if not enrich:
+        return fetch_daybook_vouchers(url, from_date, to_date, SALES_TYPES, SALES_TYPE, "Sales")
+    headers, items, ledgers = fetch_native_vouchers(
+        url, company, from_date, to_date, SALES_CHILDOF, SALES_TYPE, SALES_TYPES, enrich=enrich, label="Sales"
     )
+    attach_alternate_qty(url, items)
+    return headers, items, ledgers
 
 
 def save(
