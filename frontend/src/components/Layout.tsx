@@ -79,7 +79,7 @@ export function Layout({ username, onLogout }: Props) {
           )}
           <div className="shrink-0 text-right font-mono text-xs leading-tight text-zinc-500">
             {status?.online && status.from_date && status.to_date ? (
-              <p>
+              <p className="text-sm font-medium text-amber-300">
                 {formatDate(status.from_date)} – {formatDate(status.to_date)}
               </p>
             ) : null}
