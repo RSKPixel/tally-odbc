@@ -4,6 +4,7 @@ from sqlalchemy.orm import Session
 
 from backend.db import get_db
 from backend.models import get_or_create_profile
+from backend.mysql import MysqlError, verify_superuser
 from backend.security import verify_password
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
@@ -55,4 +56,16 @@ def verify_admin_password(
     row = get_or_create_profile(db)
     if not verify_password(body.password, row.password_hash):
         raise HTTPException(status_code=403, detail="Invalid admin password")
+    return {"ok": True}
+
+
+@router.post("/verify-superuser")
+def verify_superuser_password(
+    body: PasswordBody,
+    _user: str = Depends(current_user),
+):
+    try:
+        verify_superuser(body.password)
+    except MysqlError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from exc
     return {"ok": True}

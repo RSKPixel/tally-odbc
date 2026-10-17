@@ -13,6 +13,10 @@ function heading(key: string) {
   return key.replaceAll("_", " ");
 }
 
+const thBase =
+  "sticky top-0 z-10 whitespace-nowrap border-b border-zinc-800 bg-zinc-950 px-3 py-2.5 text-[11px] font-medium uppercase tracking-wider text-zinc-500 first:pl-8 last:pr-8";
+const tdBase = "whitespace-nowrap border-b border-zinc-800/70 px-3 py-2 text-zinc-200 first:pl-8 last:pr-8";
+
 export function RecordsModal({ result, onClose }: Props) {
   const [tab, setTab] = useState<Tab>("vouchers");
   const [selected, setSelected] = useState("");
@@ -91,7 +95,7 @@ export function RecordsModal({ result, onClose }: Props) {
           className="flex h-full max-h-full w-full flex-col overflow-hidden bg-zinc-950"
           onClick={(event) => event.stopPropagation()}
         >
-          <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-[5%] py-3">
+          <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-8 py-3">
             <h2 id="records-title" className="text-sm font-medium text-white">
               {result.label} · {result.count}
             </h2>
@@ -99,19 +103,17 @@ export function RecordsModal({ result, onClose }: Props) {
               Close
             </button>
           </div>
-          <div className="min-h-0 flex-1 overflow-auto p-[5%]">
+          <div className="min-h-0 flex-1 overflow-auto">
             {result.rows.length === 0 ? (
-              <p className="text-sm text-zinc-500">No records</p>
+              <p className="px-8 py-6 text-sm text-zinc-500">No records</p>
             ) : (
-              <table className="min-w-full text-left text-sm">
-                <thead className="sticky top-0 bg-zinc-900">
+              <table className="w-full border-collapse text-left text-sm">
+                <thead>
                   <tr>
                     {result.columns.map((column) => (
                       <th
                         key={column}
-                        className={`whitespace-nowrap px-3 py-2 font-medium capitalize text-zinc-400 ${
-                          numeric.has(column) ? "text-right" : ""
-                        }`}
+                        className={`${thBase} ${numeric.has(column) ? "text-right" : ""}`}
                       >
                         {heading(column)}
                       </th>
@@ -120,12 +122,15 @@ export function RecordsModal({ result, onClose }: Props) {
                 </thead>
                 <tbody>
                   {result.rows.map((row, index) => (
-                    <tr key={`${row.master_id || row.voucher_no || row.invoice_no || row.ledger_name || row.cost_centre || row.stock_item}-${index}`} className="border-t border-zinc-800">
+                    <tr
+                      key={`${row.master_id || row.voucher_no || row.invoice_no || row.ledger_name || row.cost_centre || row.stock_item}-${index}`}
+                      className="hover:bg-zinc-900/60"
+                    >
                       {result.columns.map((column) => (
                         <td
                           key={column}
-                          className={`whitespace-nowrap px-3 py-2 text-zinc-200 ${
-                            numeric.has(column) ? "text-right font-mono" : ""
+                          className={`${tdBase} ${
+                            numeric.has(column) ? "text-right font-mono tabular-nums text-zinc-300" : ""
                           }`}
                         >
                           {formatDateCell(column, row[column] || "")}
@@ -162,7 +167,7 @@ export function RecordsModal({ result, onClose }: Props) {
           className="flex h-full max-h-full w-full flex-col overflow-hidden bg-zinc-950"
           onClick={(event) => event.stopPropagation()}
         >
-          <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-[5%] py-3">
+          <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-8 py-3">
             <h2 id="records-title" className="text-sm font-medium text-white">
               {result.label} · {result.count}
             </h2>
@@ -171,9 +176,9 @@ export function RecordsModal({ result, onClose }: Props) {
             </button>
           </div>
           {months.length === 0 ? (
-            <p className="p-6 text-sm text-zinc-500">No records</p>
+            <p className="px-8 py-6 text-sm text-zinc-500">No records</p>
           ) : (
-            <div className="grid min-h-0 flex-1 grid-cols-2 content-start gap-4 overflow-auto p-[5%]">
+            <div className="grid min-h-0 flex-1 grid-cols-2 content-start gap-4 overflow-auto px-8 py-6">
               {months.map((month) => (
                 <section
                   key={month.key}
@@ -216,7 +221,7 @@ export function RecordsModal({ result, onClose }: Props) {
         className="flex h-full max-h-full w-full flex-col overflow-hidden bg-zinc-950"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-[5%] py-3">
+        <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-8 py-3">
           <h2 id="records-title" className="text-sm font-medium text-white">
             {result.label} · {result.count}
           </h2>
@@ -224,7 +229,7 @@ export function RecordsModal({ result, onClose }: Props) {
             Close
           </button>
         </div>
-        <div role="tablist" className="flex shrink-0 border-b border-zinc-800 px-[5%]">
+        <div role="tablist" className="flex shrink-0 border-b border-zinc-800 px-8">
           <button type="button" role="tab" aria-selected={tab === "vouchers"} className={tabClass("vouchers")} onClick={() => setTab("vouchers")}>
             Vouchers
           </button>
@@ -232,16 +237,16 @@ export function RecordsModal({ result, onClose }: Props) {
             Items
           </button>
         </div>
-        <div className="min-h-0 flex-1 overflow-auto p-[5%]">
+        <div className="min-h-0 flex-1 overflow-auto">
           {tab === "vouchers" ? (
             result.rows.length === 0 ? (
-              <p className="p-6 text-sm text-zinc-500">No records</p>
+              <p className="px-8 py-6 text-sm text-zinc-500">No records</p>
             ) : (
-              <table className="min-w-full text-left text-sm">
-                <thead className="sticky top-0 bg-zinc-900">
+              <table className="w-full border-collapse text-left text-sm">
+                <thead>
                   <tr>
                     {result.columns.map((column) => (
-                      <th key={column} className="whitespace-nowrap px-3 py-2 font-medium capitalize text-zinc-400">
+                      <th key={column} className={thBase}>
                         {heading(column)}
                       </th>
                     ))}
@@ -251,13 +256,13 @@ export function RecordsModal({ result, onClose }: Props) {
                   {result.rows.map((row, index) => (
                     <tr
                       key={row.master_id || String(index)}
-                      className={`cursor-pointer border-t border-zinc-800 hover:bg-zinc-900 ${
-                        selected === row.master_id ? "bg-zinc-900" : ""
+                      className={`cursor-pointer hover:bg-zinc-900/60 ${
+                        selected === row.master_id ? "bg-zinc-900/80" : ""
                       }`}
                       onClick={() => void openItems(row.master_id)}
                     >
                       {result.columns.map((column) => (
-                        <td key={column} className="whitespace-nowrap px-3 py-2 text-zinc-200">
+                        <td key={column} className={tdBase}>
                           {formatDateCell(column, row[column] || "")}
                         </td>
                       ))}
@@ -268,22 +273,22 @@ export function RecordsModal({ result, onClose }: Props) {
             )
           ) : (
             <div>
-              {busy ? <p className="p-6 text-sm text-zinc-500">Loading items…</p> : null}
-              {error ? <p className="p-6 text-sm text-red-400">{error}</p> : null}
+              {busy ? <p className="px-8 py-6 text-sm text-zinc-500">Loading items…</p> : null}
+              {error ? <p className="px-8 py-6 text-sm text-red-400">{error}</p> : null}
               {!busy && !error && !items ? (
-                <p className="p-6 text-sm text-zinc-500">Click a voucher to load its items</p>
+                <p className="px-8 py-6 text-sm text-zinc-500">Click a voucher to load its items</p>
               ) : null}
               {items && !busy && !error ? (
                 items.items.length === 0 ? (
-                  <p className="p-6 text-sm text-zinc-500">No items</p>
+                  <p className="px-8 py-6 text-sm text-zinc-500">No items</p>
                 ) : (
-                  <table className="min-w-full text-left text-sm">
-                    <thead className="sticky top-0 bg-zinc-900">
+                  <table className="w-full border-collapse text-left text-sm">
+                    <thead>
                       <tr>
                         {items.columns.map((column) => (
                           <th
                             key={column}
-                            className={`whitespace-nowrap px-3 py-2 font-medium capitalize text-zinc-400 ${
+                            className={`${thBase} ${
                               column === "qty_alt" || column === "conversion" ? "text-right" : ""
                             }`}
                           >
@@ -294,12 +299,17 @@ export function RecordsModal({ result, onClose }: Props) {
                     </thead>
                     <tbody>
                       {items.items.map((row, index) => (
-                        <tr key={`${row.master_id}-${row.stock_item}-${index}`} className="border-t border-zinc-800">
+                        <tr
+                          key={`${row.master_id}-${row.stock_item}-${index}`}
+                          className="hover:bg-zinc-900/60"
+                        >
                           {items.columns.map((column) => (
                             <td
                               key={column}
-                              className={`whitespace-nowrap px-3 py-2 text-zinc-200 ${
-                                column === "qty_alt" || column === "conversion" ? "text-right font-mono" : ""
+                              className={`${tdBase} ${
+                                column === "qty_alt" || column === "conversion"
+                                  ? "text-right font-mono tabular-nums text-zinc-300"
+                                  : ""
                               }`}
                             >
                               {formatDateCell(column, row[column] || "")}

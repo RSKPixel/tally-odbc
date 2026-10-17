@@ -73,6 +73,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ password }),
     }),
+  verifySuperuser: (password: string) =>
+    request<{ ok: boolean }>("/api/auth/verify-superuser", {
+      method: "POST",
+      body: JSON.stringify({ password }),
+    }),
   settings: () => request<AppSettings>("/api/settings"),
   saveSettings: (body: AppSettings) =>
     request<AppSettings>("/api/settings", {

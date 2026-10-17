@@ -133,12 +133,12 @@ export function FetchCard({
     setChecking(true);
     setPasswordError("");
     try {
-      await api.verifyPassword(password);
+      await api.verifySuperuser(password);
       setOpen(pending);
       setPending(null);
       setPassword("");
     } catch (err) {
-      setPasswordError(err instanceof Error ? err.message : "Invalid admin password");
+      setPasswordError(err instanceof Error ? err.message : "Invalid super user password");
     } finally {
       setChecking(false);
     }
@@ -260,32 +260,44 @@ export function FetchCard({
         </form>
         {results.length ? (
           <div className="mt-6 min-h-0 flex-1 overflow-auto border-t border-zinc-800">
-            <table className="mt-2 w-full text-left text-sm">
-              <thead className="sticky top-0 bg-zinc-900/95">
-                <tr className="text-zinc-500">
-                  <th className="py-2 pr-4 font-medium">Collection</th>
-                  <th className="py-2 pr-4 font-medium">Records</th>
-                  <th className="py-2 font-medium">Elapsed</th>
+            <table className="w-full table-fixed border-collapse text-left text-sm">
+              <colgroup>
+                <col className="w-[40%]" />
+                <col className="w-[40%]" />
+                <col className="w-[20%]" />
+              </colgroup>
+              <thead>
+                <tr className="text-[11px] uppercase tracking-wider text-zinc-500">
+                  <th className="sticky top-0 z-10 bg-zinc-950 py-2.5 pr-4 font-medium">Collection</th>
+                  <th className="sticky top-0 z-10 bg-zinc-950 py-2.5 pr-4 font-medium">Records</th>
+                  <th className="sticky top-0 z-10 bg-zinc-950 py-2.5 text-right font-medium">Elapsed</th>
                 </tr>
               </thead>
               <tbody>
                 {results.map((row) => (
-                  <tr key={row.id} className="border-t border-zinc-800">
-                    <td className="py-3 pr-4 text-zinc-300">{row.label}</td>
-                    <td className="py-3 pr-4">
+                  <tr key={row.id} className="border-t border-zinc-800/80">
+                    <td className="truncate py-2.5 pr-4 text-zinc-200" title={row.label}>
+                      {row.label}
+                    </td>
+                    <td className="py-2.5 pr-4">
                       {row.error ? (
-                        <span className="text-red-400">{row.error}</span>
+                        <span className="block truncate text-red-400" title={row.error}>
+                          {row.error}
+                        </span>
                       ) : (
                         <button
                           type="button"
                           onClick={() => askForRecords(row)}
-                          className="text-emerald-400 hover:text-emerald-300"
+                          className="truncate text-left text-emerald-400 hover:text-emerald-300"
+                          title={amountLabel(row)}
                         >
                           {amountLabel(row)}
                         </button>
                       )}
                     </td>
-                    <td className="py-3 font-mono text-zinc-400">{row.elapsed}</td>
+                    <td className="py-2.5 text-right font-mono tabular-nums text-zinc-400">
+                      {row.elapsed}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -308,8 +320,8 @@ export function FetchCard({
             <p className="mt-2 text-sm text-zinc-400">{pending.label}</p>
             <div className="mt-4">
               <Field
-                id="records_admin_password"
-                label="Admin password"
+                id="records_superuser_password"
+                label="Super user password"
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
