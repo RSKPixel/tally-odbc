@@ -54,8 +54,11 @@ export function Layout({ username, onLogout }: Props) {
   return (
     <div className="flex h-screen w-full flex-col bg-zinc-950">
       <header className="flex h-14 shrink-0 items-stretch border-b border-zinc-800">
-        <div className="flex w-56 shrink-0 items-center border-r border-zinc-800 px-4">
-          <span className="text-sm font-semibold tracking-tight text-emerald-400">Tally sync</span>
+        <div className="flex w-60 shrink-0 items-center justify-center border-r border-zinc-800 px-4">
+          <span className="text-xl font-bold tracking-[0.18em]" style={{ fontFamily: '"IBM Plex Sans", sans-serif' }}>
+            <span className="text-[#f3efe6]">TALLY</span>
+            <span className="text-[#e2c08a]">SYNC</span>
+          </span>
         </div>
         <div className="flex min-w-0 flex-1 items-center justify-between gap-4 px-6">
           {statusError ? (
@@ -65,7 +68,11 @@ export function Layout({ username, onLogout }: Props) {
           ) : status.online ? (
             <div className="min-w-0">
               <p className="text-[11px] uppercase tracking-wider text-emerald-600">Loaded company</p>
-              <p className="truncate text-sm font-medium leading-tight text-white" title={status.company}>
+              <p
+                className="truncate text-sm font-medium leading-tight text-white"
+                style={{ fontFamily: '"IBM Plex Sans", sans-serif' }}
+                title={status.company}
+              >
                 {status.company || "—"}
               </p>
             </div>
@@ -90,7 +97,7 @@ export function Layout({ username, onLogout }: Props) {
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <aside className="flex w-56 shrink-0 flex-col border-r border-zinc-800">
+        <aside className="flex w-60 shrink-0 flex-col border-r border-zinc-800">
           <nav className="flex flex-1 flex-col gap-1 p-3">
             <NavLink to="/" className={navClass} end>
               Home

@@ -34,7 +34,10 @@ export function Login({ onLoggedIn }: Props) {
         autoComplete="off"
         className="w-full max-w-sm rounded-2xl border border-zinc-800 bg-zinc-900/70 p-8 shadow-xl shadow-black/40"
       >
-        <p className="text-xs font-medium uppercase tracking-[0.2em] text-emerald-500">Tally sync</p>
+        <p className="text-xl font-bold tracking-[0.18em]" style={{ fontFamily: '"IBM Plex Sans", sans-serif' }}>
+          <span className="text-[#f3efe6]">TALLY</span>
+          <span className="text-[#e2c08a]">SYNC</span>
+        </p>
         <h1 className="mt-2 text-2xl font-semibold text-white">Sign in</h1>
         <div className="mt-6 space-y-4">
           <Field
