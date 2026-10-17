@@ -1,11 +1,14 @@
 import { FormEvent, useEffect, useState } from "react";
+import { useOutletContext } from "react-router-dom";
 import { api, Me } from "../api";
 import { Field } from "../components/Field";
+import { LayoutContext } from "../components/Layout";
 
 type Tab = "tally" | "profile";
 type Props = { onProfileSaved: (me: Me) => void };
 
 export function Settings({ onProfileSaved }: Props) {
+  const { refreshStatus } = useOutletContext<LayoutContext>();
   const [tab, setTab] = useState<Tab>("tally");
   const [host, setHost] = useState("officehq");
   const [port, setPort] = useState("9000");
@@ -52,6 +55,7 @@ export function Settings({ onProfileSaved }: Props) {
       setHost(saved.tally_host);
       setPort(String(saved.tally_port));
       setMessage("Saved.");
+      refreshStatus();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Save failed");
     } finally {

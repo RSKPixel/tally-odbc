@@ -7,10 +7,6 @@ services:
       dockerfile: docker/Dockerfile.backend
     env_file:
       - .env
-    environment:
-      SQLITE_PATH: /data/app.sqlite
-    volumes:
-      - tallysync-data:/data
     restart: unless-stopped
     # MySQL and Tally run separately; MYSQL_HOST and TALLY_HOST must resolve inside this container
     extra_hosts:
@@ -38,6 +34,3 @@ services:
       backend:
         condition: service_healthy
     restart: unless-stopped
-
-volumes:
-  tallysync-data:

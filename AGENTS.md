@@ -16,11 +16,12 @@ Git does **not** carry secrets or local state. Copy or clone the repo, then recr
 
 | Path | In git? | What to do |
 |---|---|---|
-| `backend/.env` | No (see `backend/.env.example`) | Copy the example and fill passwords |
-| `backend/app.sqlite` | No | Created on first API start. Holds Tally host/port, login profile, company→database |
+| `backend/.env` | No (see `backend/.env.example`) | Copy the example and fill passwords (same MySQL as everyone else) |
 | `frontend/node_modules/` | No | `npm install` in `frontend/` |
 | `.venv/` | No | Create a venv and `pip install -r backend/requirements.txt` |
 | `out/` | No | CSV output from the CLI |
+
+App login, Tally host/port, and company→database bindings live in **shared MySQL** (`MYSQL_DATABASE`, default `tallysync`) as tables `app_settings`, `app_profile`, `company_database`. Every machine that points at the same MySQL sees the same values. There is no per-machine SQLite for app state.
 
 `backend/.env` keys (all read by `backend/config.py`; empty values override the code defaults):
 
@@ -31,7 +32,6 @@ MYSQL_PASSWORD=
 MYSQL_DATABASE=tallysync
 MYSQL_PORT=3306
 SUPERUSER_PASSWORD=
-SQLITE_PATH=app.sqlite
 ADMIN_USER=admin
 ADMIN_PASSWORD=
 SESSION_SECRET=replace-with-a-long-random-string
@@ -39,11 +39,11 @@ TALLY_HOST=officehq
 TALLY_PORT=9000
 ```
 
-- Set `ADMIN_PASSWORD` **before the first API start**. The first run hashes it into SQLite `app_profile`. Later `.env` edits do not change the stored login. Change the password in Settings → Profile after that.
-- `SESSION_SECRET` must be a long random string. Sessions die if it changes.
+- Set `ADMIN_PASSWORD` **before the first API start against an empty control DB**. The first run hashes it into MySQL `app_profile`. Later `.env` edits do not change the stored login. Change the password in Settings → Profile after that.
+- `SESSION_SECRET` must be a long random string. Use the **same** value on every machine if you want cookies interchangeable; sessions die if it changes.
 - `SUPERUSER_PASSWORD` is the password the Home page asks for when saving a company→database binding. If it is empty, the check uses `MYSQL_PASSWORD`.
-- `MYSQL_DATABASE` is only a label in the example. Sync writes the database saved on the Home page for the loaded company, not this env value.
-- `TALLY_HOST` / `TALLY_PORT` seed SQLite `app_settings` once. After that, Settings → Tally settings is the source of truth.
+- `MYSQL_DATABASE` is the shared control database (created on API start if missing). Sync still writes into the database saved on the Home page for the loaded company, not this env value for voucher tables.
+- `TALLY_HOST` / `TALLY_PORT` seed MySQL `app_settings` once. After that, Settings → Tally settings is the source of truth for everyone.
 
 Setup, from the repo root (Windows, TallyPrime with **one** company open):
 
@@ -83,14 +83,14 @@ Home:
 
 1. `GET /api/tally/status` — `List of Companies` via the saved host/port. Shows URL, loaded company, books period. Offline is a message, not a crash.
 2. More than one company loaded: Fetch and Sync stay disabled. Message: keep only one company open. The API returns 400 `Keep only one company open in Tally`. The web app never sends `SVCURRENTCOMPANY`.
-3. MySQL database dropdown from `SHOW DATABASES` (system schemas hidden). Save writes SQLite `company_database` (exact Tally company name → database name) after the superuser password check. The database must already exist on the server.
+3. MySQL database dropdown from `SHOW DATABASES` (system schemas hidden). Save writes MySQL `company_database` (exact Tally company name → database name) after the superuser password check. The database must already exist on the server.
 4. **Fetch** lists voucher headers only (`enrich=False`). Fast. Count is vouchers. Click the count to open them. Click a voucher to load that one object’s inventory lines.
 5. **Sync** is enabled only after a Fetch has results and the dropdown matches the saved database. It re-fetches with `enrich=True` and replaces item lines in MySQL for that date range. Count is lines inserted, not vouchers.
 
 Settings:
 
-- Tally host and port → SQLite `app_settings`
-- Profile username, display name, optional new password → SQLite `app_profile` (PBKDF2-HMAC-SHA256). Header shows the display name when set.
+- Tally host and port → MySQL `app_settings` (shared)
+- Profile username, display name, optional new password → MySQL `app_profile` (PBKDF2-HMAC-SHA256, shared). Header shows the display name when set.
 
 Forms: `autoComplete="off"` on forms. `Field` / `SelectField` use `autoComplete="new-password"` plus `data-1p-ignore` and `data-lpignore`. Leave browser autofill off.
 
@@ -352,8 +352,8 @@ Old dumps under `out/` (`daybook.raw.xml` ~95 MB, `purchases.raw.xml`) came from
 - Diagnostic scripts (`time_sales_pulls.py`, `try_date_filters.py`, `measure_1day.py`, `check_stock_udf.py`) lived in `%TEMP%`, not this repo.
 - `out_sync/` was a one-off when `out\voucher_items.csv` was locked.
 - Sync deletes by `voucher_date` then inserts. Running Sync on an empty Fetch result still deletes that period if Tally returns no lines.
-- Company→database lives in SQLite on this PC. A new machine must Save the binding again.
-- Profile password lives in SQLite. A new machine uses `ADMIN_PASSWORD` only until the first start creates `app_profile`.
+- Company→database and profile live in shared MySQL `MYSQL_DATABASE`. A new machine only needs a working `.env` pointing at the same server; no re-Save unless the binding was never set.
+- `ADMIN_PASSWORD` seeds `app_profile` only when that table row is missing (first start against an empty control DB).
 
 ## Next work (not done)
 
@@ -375,8 +375,8 @@ Old dumps under `out/` (`daybook.raw.xml` ~95 MB, `purchases.raw.xml`) came from
 | `tallysync/__main__.py` | `python -m tallysync` runs all four CLIs |
 | `backend/main.py` | FastAPI app, session, CORS, routers |
 | `backend/config.py` | `backend/.env` |
-| `backend/db.py` | SQLite engine, `backend/app.sqlite` |
-| `backend/models.py` | `app_settings`, `app_profile`, `company_database` |
+| `backend/db.py` | MySQL engine for shared control DB (`MYSQL_DATABASE`) |
+| `backend/models.py` | `app_settings`, `app_profile`, `company_database` (in MySQL) |
 | `backend/auth.py` | login / logout / me |
 | `backend/security.py` | password hash |
 | `backend/settings.py` | Tally host/port |

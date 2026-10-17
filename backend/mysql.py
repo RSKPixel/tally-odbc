@@ -46,7 +46,11 @@ def list_databases() -> list[str]:
             names = [list(row.values())[0] for row in cur.fetchall()]
     finally:
         conn.close()
-    return [name for name in names if name not in _SYSTEM_DATABASES]
+    control = (settings.mysql_database or "").strip()
+    hidden = set(_SYSTEM_DATABASES)
+    if control:
+        hidden.add(control)
+    return [name for name in names if name not in hidden]
 
 
 def verify_superuser(password: str) -> None:

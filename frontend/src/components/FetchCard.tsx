@@ -32,26 +32,80 @@ function addDays(iso: string, days: number) {
   return `${yy}-${mm}-${dd}`;
 }
 
+function rangeForOption(
+  option: "15days" | "period",
+  tallyFrom?: string,
+  tallyTo?: string,
+): { from: string; to: string } {
+  if (option === "period") {
+    const from = tallyFrom || defaultToDate(tallyFrom, tallyTo);
+    const to = tallyTo || defaultToDate(tallyFrom, tallyTo);
+    return { from, to: to < from ? from : to };
+  }
+  const to = defaultToDate(tallyFrom, tallyTo);
+  const from = clampDate(addDays(to, -14), tallyFrom, to);
+  return { from, to };
+}
+
 function amountLabel(row: { id?: string; count: number; vouchers?: number; lines?: number }) {
   if (row.vouchers != null && row.lines != null && (row.id === "sales" || row.id === "purchase")) {
     const voucherWord = row.vouchers === 1 ? "voucher" : "vouchers";
     const lineWord = row.lines === 1 ? "line" : "lines";
     return `${row.vouchers} ${voucherWord} · ${row.lines} ${lineWord}`;
   }
+  if (row.id === "inventory") {
+    const word = row.count === 1 ? "item" : "items";
+    return `${row.count} ${word}`;
+  }
+  if (row.id === "accounts") {
+    const word = row.count === 1 ? "account" : "accounts";
+    return `${row.count} ${word}`;
+  }
+  if (row.id === "costcentres") {
+    const word = row.count === 1 ? "centre" : "centres";
+    return `${row.count} ${word}`;
+  }
+  if (row.id === "receivables" || row.id === "payables") {
+    const word = row.count === 1 ? "bill" : "bills";
+    return `${row.count} ${word}`;
+  }
+  if (row.id === "daybook") {
+    const word = row.count === 1 ? "line" : "lines";
+    return `${row.count} ${word}`;
+  }
   const word = row.count === 1 ? "line" : "lines";
   return `${row.count} ${word}`;
 }
 
-type Props = { online: boolean; fromDate?: string; toDate?: string; databaseReady: boolean };
+type Props = {
+  online: boolean;
+  fromDate?: string;
+  toDate?: string;
+  databaseReady: boolean;
+  collections: CollectionInfo[];
+  selected: Record<string, boolean>;
+  fullFetch: boolean;
+};
 
-export function FetchCard({ online, fromDate: tallyFrom, toDate: tallyTo }: Props) {
-  const [collections, setCollections] = useState<CollectionInfo[]>([]);
-  const [selected, setSelected] = useState<Record<string, boolean>>({});
-  const [fromDate, setFromDate] = useState(() => clampDate(tallyFrom || todayIso(), tallyFrom, tallyTo));
-  const [toDate, setToDate] = useState(() => defaultToDate(tallyFrom, tallyTo));
-  const [fullFetch, setFullFetch] = useState(false);
+export function FetchCard({
+  online,
+  fromDate: tallyFrom,
+  toDate: tallyTo,
+  databaseReady,
+  collections,
+  selected,
+  fullFetch,
+}: Props) {
+  const initial = rangeForOption("15days", tallyFrom, tallyTo);
+  const [dateOption, setDateOption] = useState<"15days" | "period">("15days");
+  const [fromDate, setFromDate] = useState(initial.from);
+  const [toDate, setToDate] = useState(initial.to);
   const [results, setResults] = useState<FetchResult[]>([]);
+  const [pending, setPending] = useState<FetchResult | null>(null);
   const [open, setOpen] = useState<FetchResult | null>(null);
+  const [password, setPassword] = useState("");
+  const [passwordError, setPasswordError] = useState("");
+  const [checking, setChecking] = useState(false);
   const [error, setError] = useState("");
   const [terminal, setTerminal] = useState<{
     collections: string[];
@@ -60,20 +114,48 @@ export function FetchCard({ online, fromDate: tallyFrom, toDate: tallyTo }: Prop
     full_fetch: boolean;
   } | null>(null);
 
-  useEffect(() => {
-    api
-      .collections()
-      .then((rows) => {
-        setCollections(rows);
-        setSelected(Object.fromEntries(rows.map((row) => [row.id, true])));
-      })
-      .catch((err: unknown) => setError(err instanceof Error ? err.message : "Could not load collections"));
-  }, []);
+  function askForRecords(row: FetchResult) {
+    setPending(row);
+    setPassword("");
+    setPasswordError("");
+  }
+
+  function closePassword() {
+    if (checking) return;
+    setPending(null);
+    setPassword("");
+    setPasswordError("");
+  }
+
+  async function confirmPassword(event: FormEvent) {
+    event.preventDefault();
+    if (!pending) return;
+    setChecking(true);
+    setPasswordError("");
+    try {
+      await api.verifyPassword(password);
+      setOpen(pending);
+      setPending(null);
+      setPassword("");
+    } catch (err) {
+      setPasswordError(err instanceof Error ? err.message : "Invalid admin password");
+    } finally {
+      setChecking(false);
+    }
+  }
 
   useEffect(() => {
-    if (tallyFrom) setFromDate((prev) => clampDate(prev || tallyFrom, tallyFrom, tallyTo));
-    if (tallyFrom || tallyTo) setToDate(defaultToDate(tallyFrom, tallyTo));
-  }, [tallyFrom, tallyTo]);
+    const next = rangeForOption(dateOption, tallyFrom, tallyTo);
+    setFromDate(next.from);
+    setToDate(next.to);
+  }, [tallyFrom, tallyTo, dateOption]);
+
+  function changeDateOption(option: "15days" | "period") {
+    setDateOption(option);
+    const next = rangeForOption(option, tallyFrom, tallyTo);
+    setFromDate(next.from);
+    setToDate(next.to);
+  }
 
   function changeFrom(value: string) {
     const next = clampDate(value, tallyFrom, tallyTo);
@@ -87,11 +169,12 @@ export function FetchCard({ online, fromDate: tallyFrom, toDate: tallyTo }: Prop
     setFromDate((prev) => (prev && next && next < prev ? next : prev));
   }
 
-  const shownFrom = fullFetch ? fromDate : clampDate(toDate ? addDays(toDate, -14) : fromDate, tallyFrom, toDate);
-
   async function submit(event: FormEvent) {
     event.preventDefault();
-    const names = collections.filter((row) => selected[row.id]).map((row) => row.id);
+    const names = collections
+      .filter((row) => selected[row.id])
+      .filter((row) => fullFetch || row.id !== "daybook")
+      .map((row) => row.id);
     if (!names.length) {
       setError("Select a collection");
       return;
@@ -102,45 +185,39 @@ export function FetchCard({ online, fromDate: tallyFrom, toDate: tallyTo }: Prop
       collections: names,
       from_date: fromDate,
       to_date: toDate,
-      full_fetch: fullFetch,
+      full_fetch: true,
     });
   }
 
   return (
     <>
-      <div className="flex h-full flex-col rounded-2xl border border-zinc-800 bg-zinc-900/50 p-6">
-        <form onSubmit={(event) => void submit(event)} autoComplete="off" className="space-y-6">
-          <div className="flex flex-wrap gap-4">
-            {collections.map((row) => (
-              <label key={row.id} className="flex items-center gap-2 text-sm text-zinc-300">
-                <input
-                  type="checkbox"
-                  checked={Boolean(selected[row.id])}
-                  onChange={(event) => setSelected((prev) => ({ ...prev, [row.id]: event.target.checked }))}
-                  autoComplete="new-password"
-                  data-1p-ignore
-                  data-lpignore="true"
-                  className="size-4 rounded border-zinc-600 bg-zinc-900 text-emerald-600"
-                />
-                {row.label}
-              </label>
-            ))}
+      <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/50 p-6">
+        <form onSubmit={(event) => void submit(event)} autoComplete="off" className="shrink-0 space-y-6">
+          <p className="text-sm text-zinc-500">{fullFetch ? "Full mode" : "Quick mode"}</p>
+          <div>
+            <p className="text-xs uppercase tracking-wider text-zinc-500">Dates</p>
+            <div className="mt-3 grid max-w-md grid-cols-2 gap-2">
+              {(
+                [
+                  ["15days", "15 days"],
+                  ["period", "Full period"],
+                ] as const
+              ).map(([id, label]) => (
+                <button
+                  key={id}
+                  type="button"
+                  onClick={() => changeDateOption(id)}
+                  className={`rounded-lg border px-3 py-2 text-sm ${
+                    dateOption === id
+                      ? "border-emerald-600 bg-emerald-600/15 text-emerald-300"
+                      : "border-zinc-700 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
           </div>
-          <label className="flex items-center gap-2 text-sm text-zinc-300">
-            <input
-              type="checkbox"
-              checked={fullFetch}
-              onChange={(event) => setFullFetch(event.target.checked)}
-              autoComplete="new-password"
-              data-1p-ignore
-              data-lpignore="true"
-              className="size-4 rounded border-zinc-600 bg-zinc-900 text-emerald-600"
-            />
-            Full fetch
-          </label>
-          <p className="text-sm text-zinc-500">
-            {fullFetch ? "Selected period, 15 days at a time." : "Last 15 days through the To date."}
-          </p>
           <div className="grid max-w-md grid-cols-2 gap-4">
             <Field
               id="from_date"
@@ -149,9 +226,8 @@ export function FetchCard({ online, fromDate: tallyFrom, toDate: tallyTo }: Prop
               lang="en-IN"
               min={tallyFrom || undefined}
               max={toDate || tallyTo || undefined}
-              value={shownFrom}
+              value={fromDate}
               onChange={(e) => changeFrom(e.target.value)}
-              disabled={!fullFetch}
               required
             />
             <Field
@@ -170,17 +246,22 @@ export function FetchCard({ online, fromDate: tallyFrom, toDate: tallyTo }: Prop
           <div className="flex flex-wrap gap-3">
             <button
               type="submit"
-              disabled={!online || Boolean(terminal)}
+              disabled={!online || !databaseReady || Boolean(terminal)}
               className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-60"
+              title={
+                !databaseReady
+                  ? "Save the MySQL database binding before fetching"
+                  : undefined
+              }
             >
               Fetch
             </button>
           </div>
         </form>
         {results.length ? (
-          <div className="mt-6 overflow-x-auto border-t border-zinc-800">
+          <div className="mt-6 min-h-0 flex-1 overflow-auto border-t border-zinc-800">
             <table className="mt-2 w-full text-left text-sm">
-              <thead>
+              <thead className="sticky top-0 bg-zinc-900/95">
                 <tr className="text-zinc-500">
                   <th className="py-2 pr-4 font-medium">Collection</th>
                   <th className="py-2 pr-4 font-medium">Records</th>
@@ -197,7 +278,7 @@ export function FetchCard({ online, fromDate: tallyFrom, toDate: tallyTo }: Prop
                       ) : (
                         <button
                           type="button"
-                          onClick={() => setOpen(row)}
+                          onClick={() => askForRecords(row)}
                           className="text-emerald-400 hover:text-emerald-300"
                         >
                           {amountLabel(row)}
@@ -212,6 +293,50 @@ export function FetchCard({ online, fromDate: tallyFrom, toDate: tallyTo }: Prop
           </div>
         ) : null}
       </div>
+      {pending ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onClick={closePassword}
+        >
+          <form
+            autoComplete="off"
+            className="w-full max-w-sm rounded-2xl border border-zinc-800 bg-zinc-950 p-6 shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+            onSubmit={(event) => void confirmPassword(event)}
+          >
+            <h2 className="text-sm font-medium text-white">View records</h2>
+            <p className="mt-2 text-sm text-zinc-400">{pending.label}</p>
+            <div className="mt-4">
+              <Field
+                id="records_admin_password"
+                label="Admin password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                required
+              />
+            </div>
+            {passwordError ? <p className="mt-3 text-sm text-red-400">{passwordError}</p> : null}
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                disabled={checking}
+                className="text-sm text-zinc-400 hover:text-zinc-100"
+                onClick={closePassword}
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={checking}
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-60"
+              >
+                {checking ? "Checking…" : "Open"}
+              </button>
+            </div>
+          </form>
+        </div>
+      ) : null}
       {open ? <RecordsModal result={open} onClose={() => setOpen(null)} /> : null}
       {terminal ? (
         <FetchTerminal

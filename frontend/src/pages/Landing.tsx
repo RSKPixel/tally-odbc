@@ -1,12 +1,12 @@
 import { FormEvent, useEffect, useState } from "react";
-import { api, TallyStatus } from "../api";
+import { useOutletContext } from "react-router-dom";
+import { api, CollectionInfo } from "../api";
 import { FetchCard } from "../components/FetchCard";
 import { Field, SelectField } from "../components/Field";
-import { formatDate } from "../dates";
+import { LayoutContext } from "../components/Layout";
 
 export function Landing() {
-  const [status, setStatus] = useState<TallyStatus | null>(null);
-  const [error, setError] = useState("");
+  const { status, statusError } = useOutletContext<LayoutContext>();
   const [databases, setDatabases] = useState<string[]>([]);
   const [database, setDatabase] = useState("");
   const [savedDatabase, setSavedDatabase] = useState("");
@@ -15,17 +15,13 @@ export function Landing() {
   const [saveError, setSaveError] = useState("");
   const [saveMessage, setSaveMessage] = useState("");
   const [saving, setSaving] = useState(false);
+  const [collections, setCollections] = useState<CollectionInfo[]>([]);
+  const [selected, setSelected] = useState<Record<string, boolean>>({});
+  const [collectionsError, setCollectionsError] = useState("");
+  const [mode, setMode] = useState<"quick" | "full">("quick");
 
   useEffect(() => {
     let cancelled = false;
-    api
-      .tallyStatus()
-      .then((row) => {
-        if (!cancelled) setStatus(row);
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) setError(err instanceof Error ? err.message : "Could not load Tally status");
-      });
     api
       .mysqlDatabases()
       .then((row) => {
@@ -44,10 +40,32 @@ export function Landing() {
       .catch(() => {
         /* Tally offline or extra companies */
       });
+    api
+      .collections()
+      .then((rows) => {
+        if (cancelled) return;
+        setCollections(rows);
+        setSelected(
+          Object.fromEntries(rows.map((row) => [row.id, row.id !== "daybook"])),
+        );
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setCollectionsError(err instanceof Error ? err.message : "Could not load collections");
+        }
+      });
     return () => {
       cancelled = true;
     };
   }, []);
+
+  function changeMode(next: "quick" | "full") {
+    setMode(next);
+    setSelected((prev) => ({
+      ...prev,
+      daybook: next === "full" ? true : false,
+    }));
+  }
 
   const extraCompanies = (status?.companies?.length ?? 0) > 1;
   const extras = (status?.companies ?? []).filter((name) => name !== status?.company);
@@ -85,74 +103,127 @@ export function Landing() {
   }
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      {error ? <p className="text-sm text-red-400">{error}</p> : null}
-      {!status && !error ? <p className="text-sm text-zinc-500">Checking Tally…</p> : null}
+    <div className="flex h-full min-h-0 flex-1 flex-col overflow-hidden">
+      {statusError ? <p className="shrink-0 text-sm text-red-400">{statusError}</p> : null}
+      {!status && !statusError ? <p className="shrink-0 text-sm text-zinc-500">Checking Tally…</p> : null}
       {status ? (
         <>
-          <div className="grid h-full min-h-0 flex-1 grid-cols-2 items-stretch gap-6">
-          <div className="h-full rounded-2xl border border-zinc-800 bg-zinc-900/50 p-6">
-            <p className="text-xs uppercase tracking-wider text-zinc-500">Tally server</p>
-            <p className="mt-1 font-mono text-sm text-zinc-300">{status.url}</p>
-            {status.online ? (
-              <>
-                <p className="mt-6 text-xs uppercase tracking-wider text-emerald-600">Loaded company</p>
-                <p className="mt-2 text-2xl font-medium text-white">{status.company}</p>
-                {extraCompanies ? (
-                  <p className="mt-3 text-sm text-amber-400">
-                    Close extra companies in Tally and keep only one open
-                    {extras.length ? `: ${extras.join(", ")}` : ""}.
-                  </p>
-                ) : null}
-                {status.from_date && status.to_date ? (
-                  <p className="mt-3 font-mono text-sm text-zinc-400">
-                    {formatDate(status.from_date)} – {formatDate(status.to_date)}
-                  </p>
-                ) : null}
-                <div className="mt-6 flex max-w-md items-end gap-3">
-                  <div className="min-w-0 flex-1">
-                    <SelectField
-                      id="mysql_database"
-                      label="MySQL database"
-                      value={database}
-                      onChange={(e) => {
-                        setDatabase(e.target.value);
-                        setSaveMessage("");
-                      }}
+          <div className="grid min-h-0 flex-1 grid-cols-2 items-stretch gap-6 overflow-hidden">
+            <div className="flex min-h-0 flex-col overflow-hidden rounded-2xl border border-zinc-800 bg-zinc-900/50 p-6">
+              <p className="text-xs uppercase tracking-wider text-zinc-500">MySQL binding</p>
+              {status.online ? (
+                <>
+                  {extraCompanies ? (
+                    <p className="mt-3 text-sm text-amber-400">
+                      Close extra companies in Tally and keep only one open
+                      {extras.length ? `: ${extras.join(", ")}` : ""}.
+                    </p>
+                  ) : null}
+                  <div className="mt-4 flex max-w-md items-end gap-3">
+                    <div className="min-w-0 flex-1">
+                      <SelectField
+                        id="mysql_database"
+                        label="MySQL database"
+                        value={database}
+                        onChange={(e) => {
+                          setDatabase(e.target.value);
+                          setSaveMessage("");
+                        }}
+                      >
+                        <option value="">Select database</option>
+                        {databaseOptions.map((name) => (
+                          <option key={name} value={name}>
+                            {name}
+                          </option>
+                        ))}
+                      </SelectField>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={!canSave || saving}
+                      onClick={openSave}
+                      className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-60"
                     >
-                      <option value="">Select database</option>
-                      {databaseOptions.map((name) => (
-                        <option key={name} value={name}>
-                          {name}
-                        </option>
-                      ))}
-                    </SelectField>
+                      Save
+                    </button>
                   </div>
-                  <button
-                    type="button"
-                    disabled={!canSave || saving}
-                    onClick={openSave}
-                    className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-500 disabled:opacity-60"
-                  >
-                    Save
-                  </button>
-                </div>
-                {saveError ? <p className="mt-3 text-sm text-red-400">{saveError}</p> : null}
-                {saveMessage ? <p className="mt-3 text-sm text-emerald-400">{saveMessage}</p> : null}
-              </>
-            ) : (
-              <>
-                <p className="mt-6 text-sm text-amber-400">Tally is not reachable</p>
-                <p className="mt-2 text-sm text-zinc-400">{status.error}</p>
-              </>
-            )}
-          </div>
-          <FetchCard
-            online={status.online && !extraCompanies}
-            fromDate={status.from_date}
-            toDate={status.to_date}
-            databaseReady={databaseReady}
-          />
+                  {saveError ? <p className="mt-3 text-sm text-red-400">{saveError}</p> : null}
+                  {saveMessage ? <p className="mt-3 text-sm text-emerald-400">{saveMessage}</p> : null}
+                  {savedDatabase && database === savedDatabase ? (
+                    <p className="mt-3 text-sm text-zinc-500">Saved database: {savedDatabase}</p>
+                  ) : null}
+                  <div className="mt-6 flex min-h-0 flex-1 flex-col overflow-hidden border-t border-zinc-800 pt-4">
+                    <p className="shrink-0 text-xs uppercase tracking-wider text-zinc-500">Mode</p>
+                    <div className="mt-3 grid grid-cols-2 gap-2">
+                      {(
+                        [
+                          ["quick", "Quick"],
+                          ["full", "Full"],
+                        ] as const
+                      ).map(([id, label]) => (
+                        <button
+                          key={id}
+                          type="button"
+                          onClick={() => changeMode(id)}
+                          className={`rounded-lg border px-3 py-2 text-sm ${
+                            mode === id
+                              ? "border-emerald-600 bg-emerald-600/15 text-emerald-300"
+                              : "border-zinc-700 text-zinc-400 hover:border-zinc-500 hover:text-zinc-200"
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="mt-4 shrink-0 text-xs uppercase tracking-wider text-zinc-500">Collections</p>
+                    {collectionsError ? <p className="mt-3 shrink-0 text-sm text-red-400">{collectionsError}</p> : null}
+                    <div className="mt-3 flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto pr-1">
+                      {collections.map((row) => {
+                        const daybookLocked = mode === "quick" && row.id === "daybook";
+                        return (
+                          <label
+                            key={row.id}
+                            className={`flex items-center gap-2 text-sm ${
+                              daybookLocked ? "text-zinc-600" : "text-zinc-300"
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={daybookLocked ? false : Boolean(selected[row.id])}
+                              disabled={daybookLocked}
+                              onChange={(event) =>
+                                setSelected((prev) => ({ ...prev, [row.id]: event.target.checked }))
+                              }
+                              autoComplete="new-password"
+                              data-1p-ignore
+                              data-lpignore="true"
+                              className="size-4 shrink-0 rounded border-zinc-600 bg-zinc-900 text-emerald-600 disabled:opacity-40"
+                            />
+                            <span className="min-w-0 truncate" title={row.label}>
+                              {row.label}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <p className="mt-6 text-sm text-amber-400">Tally is not reachable</p>
+                  <p className="mt-2 text-sm text-zinc-400">{status.error}</p>
+                </>
+              )}
+            </div>
+            <FetchCard
+              online={status.online && !extraCompanies}
+              fromDate={status.from_date}
+              toDate={status.to_date}
+              databaseReady={databaseReady}
+              collections={collections}
+              selected={selected}
+              fullFetch={mode === "full"}
+            />
           </div>
         </>
       ) : null}

@@ -1099,6 +1099,160 @@ def fetch_daybook_vouchers(
     return headers, [], []
 
 
+def post_daybook_register(url: str, from_day: str, to_day: str) -> bytes:
+    """HTTP XML Voucher Register for all types. No TDL/TCP collections, no Day Book."""
+    xml = f"""<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Data</TYPE>
+    <ID>Voucher Register</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        <SVFROMDATE>{xml_escape(from_day)}</SVFROMDATE>
+        <SVTODATE>{xml_escape(to_day)}</SVTODATE>
+        <EXPLODEFLAG>No</EXPLODEFLAG>
+      </STATICVARIABLES>
+    </DESC>
+  </BODY>
+</ENVELOPE>"""
+    return post_xml(url, xml, timeout=LIST_TIMEOUT)
+
+
+def _daybook_ledger_rows(
+    el: ET.Element,
+) -> list[dict]:
+    vtype = (attr(el, "VCHTYPE") or child_text(el, "VOUCHERTYPENAME")).strip()
+    vno = child_text(el, "VOUCHERNUMBER")
+    vdt = ymd(child_text(el, "DATE"))
+    narr = child_text(el, "NARRATION")
+    if not vtype and not vno:
+        return []
+    rows: list[dict] = []
+    for led in iter_named_any(el, "ALLLEDGERENTRIES.LIST", "LEDGERENTRIES.LIST"):
+        ledger = child_text(led, "LEDGERNAME")
+        if not ledger:
+            continue
+        raw_amt = money(child_text(led, "AMOUNT"))
+        try:
+            signed = float(raw_amt)
+        except ValueError:
+            continue
+        debit_credit = "Dr" if child_text(led, "ISDEEMEDPOSITIVE") == "Yes" else "Cr"
+        ledger_amount = abs(signed)
+        bills: list[tuple[str, str]] = []
+        for bill in iter_named_any(led, "BILLALLOCATIONS.LIST"):
+            bill_no = child_text(bill, "NAME")
+            if not bill_no:
+                continue
+            bills.append((bill_no, child_text(bill, "BILLTYPE")))
+        centres: list[tuple[str, str]] = []
+        for cat in iter_named_any(led, "CATEGORYALLOCATIONS.LIST"):
+            for cc in iter_named_any(cat, "COSTCENTREALLOCATIONS.LIST"):
+                name = child_text(cc, "NAME")
+                if not name:
+                    continue
+                centres.append((name, money(child_text(cc, "AMOUNT"))))
+        for cc in iter_named_any(led, "COSTCENTREALLOCATIONS.LIST"):
+            name = child_text(cc, "NAME")
+            if not name:
+                continue
+            centres.append((name, money(child_text(cc, "AMOUNT"))))
+
+        def emit(bill_no: str, bill_type: str, costcentre_name: str, costcentre_amt: str) -> None:
+            rows.append(
+                {
+                    "voucher_type": vtype,
+                    "voucher_no": vno,
+                    "voucher_date": vdt,
+                    "narration": narr,
+                    "debit_credit": debit_credit,
+                    "ledger_name": ledger,
+                    "costcentre_name": costcentre_name,
+                    "costcentre_amt": costcentre_amt,
+                    "ledger_amount": f"{ledger_amount:.2f}",
+                    "bill_no": bill_no,
+                    "bill_type": bill_type,
+                }
+            )
+
+        if centres:
+            bill_no, bill_type = bills[0] if bills else ("", "")
+            for cc_name, cc_amt in centres:
+                emit(bill_no, bill_type, cc_name, cc_amt)
+        elif bills:
+            for bill_no, bill_type in bills:
+                emit(bill_no, bill_type, "", "")
+        else:
+            emit("", "", "", "")
+    return rows
+
+
+def parse_daybook_register(root: ET.Element, from_date: str, to_date: str) -> list[dict]:
+    start = parse_row_date(from_date)
+    end = parse_row_date(to_date)
+    rows: list[dict] = []
+    for el in root.iter():
+        if local_name(el.tag) != "VOUCHER":
+            continue
+        if not (attr(el, "VCHTYPE") or child_text(el, "VOUCHERNUMBER") or child_text(el, "MASTERID")):
+            continue
+        for row in _daybook_ledger_rows(el):
+            day = parse_row_date(row.get("voucher_date") or "")
+            if start and end and day and (day < start or day > end):
+                continue
+            rows.append(row)
+    return rows
+
+
+def _read_daybook_register(url: str, frm: str, to: str) -> bytes:
+    try:
+        return post_daybook_register(url, frm, to)
+    except TallyDropped:
+        emit_progress(f"Ign {frm} .. {to} connection dropped, retrying")
+        return post_daybook_register(url, frm, to)
+
+
+def _collect_daybook_span(url: str, frm: str, to: str, rows: list[dict]) -> None:
+    try:
+        raw = _read_daybook_register(url, frm, to)
+    except TallyDropped:
+        start = parse_row_date(frm)
+        end = parse_row_date(to)
+        if not start or not end or start >= end:
+            raise
+        half = max(1, (end - start).days // 2)
+        mid = start + timedelta(days=half)
+        if mid >= end:
+            mid = end - timedelta(days=1)
+        left_to = tally_date(mid.isoformat())
+        right_from = tally_date((mid + timedelta(days=1)).isoformat())
+        emit_progress(f"Ign {frm} .. {to} connection dropped, splitting at {left_to}")
+        _collect_daybook_span(url, frm, left_to, rows)
+        _collect_daybook_span(url, right_from, to, rows)
+        return
+    root = parse_root(raw)
+    err = tally_status_error(root)
+    if err:
+        raise TallyError(f"Tally error for Voucher Register {frm} .. {to}: {err}")
+    found = parse_daybook_register(root, frm, to)
+    rows.extend(found)
+    emit_progress(f"Daybook:1 {frm} .. {to} [{len(found)} lines]")
+
+
+def fetch_daybook(url: str, company: str, from_date: str, to_date: str) -> list[dict]:
+    """Ledger lines from HTTP XML Voucher Register (daybook2 grain)."""
+    del company  # currently loaded company only
+    rows: list[dict] = []
+    for frm, to in _date_spans(from_date, to_date, span_days=7):
+        _collect_daybook_span(url, frm, to, rows)
+    emit_progress(f"Daybook:1 [{len(rows)} lines]")
+    return rows
+
+
 def fetch_native_vouchers(
     url: str,
     company: str,
@@ -1481,6 +1635,235 @@ def fetch_stock_item_groups(url: str) -> dict[str, dict]:
     return groups
 
 
+def _blank_na(value: str) -> str:
+    text = (value or "").strip()
+    if text.lower() == "not applicable":
+        return ""
+    return text
+
+
+def fetch_cost_centres(url: str) -> list[dict]:
+    """Cost centre masters."""
+    xml = """<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>TallySyncCostCentre</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="TallySyncCostCentre" ISINITIALIZE="Yes">
+            <TYPE>Cost Centre</TYPE>
+            <NATIVEMETHOD>Name, Parent, Category, MasterID, GUID</NATIVEMETHOD>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>"""
+    raw = post_xml(url, xml, timeout=LIST_TIMEOUT)
+    if b"Unknown Request" in raw:
+        raise TallyError("Tally error for cost centre master: Unknown Request")
+    root = parse_root(raw)
+    err = tally_status_error(root)
+    if err:
+        raise TallyError(f"Tally error for cost centre master: {err}")
+    rows: list[dict] = []
+    for el in root.iter():
+        if local_name(el.tag) != "COSTCENTRE":
+            continue
+        name = attr(el, "NAME") or child_text(el, "NAME")
+        if not name:
+            continue
+        rows.append(
+            {
+                "master_id": child_text(el, "MASTERID"),
+                "guid": child_text(el, "GUID"),
+                "cost_centre": name,
+                "parent": child_text(el, "PARENT").strip(),
+                "category": child_text(el, "CATEGORY").strip(),
+            }
+        )
+    rows.sort(key=lambda row: row["cost_centre"].lower())
+    emit_progress(f"Cost Centres:1 [{len(rows)} centres]")
+    return rows
+
+
+def fetch_stock_items(url: str) -> list[dict]:
+    """Stock item masters. No opening or closing balance."""
+    xml = """<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>TallySyncStockMaster</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="TallySyncStockMaster" ISINITIALIZE="Yes">
+            <TYPE>Stock Item</TYPE>
+            <NATIVEMETHOD>Name, Parent, Category, BaseUnits, AdditionalUnits, Conversion, Denominator, GSTApplicable, MasterID, GUID</NATIVEMETHOD>
+            <NATIVEMETHOD>SIVENDHIKGS</NATIVEMETHOD>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>"""
+    raw = post_xml(url, xml, timeout=LIST_TIMEOUT)
+    if b"Unknown Request" in raw:
+        raise TallyError("Tally error for inventory master: Unknown Request")
+    root = parse_root(raw)
+    err = tally_status_error(root)
+    if err:
+        raise TallyError(f"Tally error for inventory master: {err}")
+    rows: list[dict] = []
+    for el in root.iter():
+        if local_name(el.tag) != "STOCKITEM":
+            continue
+        name = attr(el, "NAME") or child_text(el, "NAME")
+        if not name:
+            continue
+        unit = _blank_na(child_text(el, "ADDITIONALUNITS"))
+        rows.append(
+            {
+                "master_id": child_text(el, "MASTERID"),
+                "guid": child_text(el, "GUID"),
+                "stock_item": name,
+                "stock_group": child_text(el, "PARENT"),
+                "category": _blank_na(child_text(el, "CATEGORY")),
+                "base_unit": _blank_na(child_text(el, "BASEUNITS")),
+                "alternate_unit": unit,
+                "conversion": child_text(el, "CONVERSION").strip(),
+                "denominator": child_text(el, "DENOMINATOR").strip(),
+                "packing": inventory_udf_number(el, "SIVENDHIKGS"),
+                "gst_applicable": child_text(el, "GSTAPPLICABLE"),
+            }
+        )
+    rows.sort(key=lambda row: row["stock_item"].lower())
+    emit_progress(f"Inventory:1 [{len(rows)} items]")
+    return rows
+
+
+def _ledger_address_lines(el: ET.Element) -> list[str]:
+    lines: list[str] = []
+    for block in iter_named_any(el, "ADDRESS.LIST"):
+        for child in block:
+            if local_name(child.tag).upper() != "ADDRESS":
+                continue
+            text = (child.text or "").strip()
+            if text:
+                lines.append(text)
+    return lines
+
+
+def _ledger_bank_details(el: ET.Element) -> dict[str, str]:
+    for block in iter_named_any(el, "PAYMENTDETAILS.LIST"):
+        favouring = child_text(block, "PAYMENTFAVOURING")
+        account_number = child_text(block, "ACCOUNTNUMBER")
+        bank_code = child_text(block, "IFSCODE")
+        bank_name = child_text(block, "BANKNAME")
+        if favouring or account_number or bank_code or bank_name:
+            return {
+                "favouring_name": favouring,
+                "account_number": account_number,
+                "bank_code": bank_code,
+                "bank_name": bank_name,
+            }
+    return {
+        "favouring_name": "",
+        "account_number": "",
+        "bank_code": "",
+        "bank_name": "",
+    }
+
+
+def fetch_accounts(url: str) -> list[dict]:
+    """Ledger masters. No opening balance."""
+    xml = """<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Collection</TYPE>
+    <ID>TallySyncLedgerMaster</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      </STATICVARIABLES>
+      <TDL>
+        <TDLMESSAGE>
+          <COLLECTION NAME="TallySyncLedgerMaster" ISINITIALIZE="Yes">
+            <TYPE>Ledger</TYPE>
+            <NATIVEMETHOD>Name, Parent, _PrimaryGroup, MasterID, GUID, PartyGSTIN, GSTRegistrationType, IsBillWiseOn, MailingName, LedgerPhone, LedgerMobile, Email, PriorStateName, CountryName, IncomeTaxNumber, Address, Pincode, PaymentDetails, SIVENDHISALEREP</NATIVEMETHOD>
+          </COLLECTION>
+        </TDLMESSAGE>
+      </TDL>
+    </DESC>
+  </BODY>
+</ENVELOPE>"""
+    raw = post_xml(url, xml, timeout=LIST_TIMEOUT)
+    if b"Unknown Request" in raw:
+        raise TallyError("Tally error for account master: Unknown Request")
+    root = parse_root(raw)
+    err = tally_status_error(root)
+    if err:
+        raise TallyError(f"Tally error for account master: {err}")
+    rows: list[dict] = []
+    for el in root.iter():
+        if local_name(el.tag) != "LEDGER":
+            continue
+        name = attr(el, "NAME") or child_text(el, "NAME")
+        if not name:
+            continue
+        address = _ledger_address_lines(el)
+        bank = _ledger_bank_details(el)
+        rows.append(
+            {
+                "master_id": child_text(el, "MASTERID"),
+                "guid": child_text(el, "GUID"),
+                "ledger_name": name,
+                "account_group": child_text(el, "PARENT"),
+                "primary_group": child_text(el, "_PRIMARYGROUP") or child_text(el, "PRIMARYGROUP"),
+                "mailing_name": child_text(el, "MAILINGNAME"),
+                "address_1": address[0] if len(address) > 0 else "",
+                "address_2": address[1] if len(address) > 1 else "",
+                "address_3": address[2] if len(address) > 2 else "",
+                "address_4": address[3] if len(address) > 3 else "",
+                "pin_code": child_text(el, "PINCODE"),
+                "gstin": child_text(el, "PARTYGSTIN"),
+                "gst_registration_type": child_text(el, "GSTREGISTRATIONTYPE"),
+                "state": child_text(el, "PRIORSTATENAME"),
+                "country": child_text(el, "COUNTRYNAME"),
+                "pan": child_text(el, "INCOMETAXNUMBER"),
+                "phone": child_text(el, "LEDGERPHONE"),
+                "mobile": child_text(el, "LEDGERMOBILE"),
+                "email": child_text(el, "EMAIL"),
+                "bill_wise": child_text(el, "ISBILLWISEON"),
+                "favouring_name": bank["favouring_name"],
+                "account_number": bank["account_number"],
+                "bank_code": bank["bank_code"],
+                "bank_name": bank["bank_name"],
+                "representative": udf_text(el, "SIVENDHISALEREP"),
+            }
+        )
+    rows.sort(key=lambda row: row["ledger_name"].lower())
+    emit_progress(f"Accounts:1 [{len(rows)} accounts]")
+    return rows
+
+
 def attach_alternate_qty(url: str, items: list[dict]) -> None:
     """Attach stock group and unit. Packing is the stock item conversion. qty_alt is the kg side of BILLEDQTY."""
     if not items:
@@ -1540,15 +1923,16 @@ def fetch_profit_loss_months(url: str, company: str, from_date: str, to_date: st
 def fetch_bills_report(
     url: str, company: str, from_date: str, to_date: str, report_id: str
 ) -> list[dict]:
-    print(report_id)
+    emit_progress(report_id)
     raw = post_bills_report(url, company, from_date, to_date, report_id)
-    print(f"  report {len(raw):,} bytes")
+    emit_progress(f"  report {len(raw):,} bytes")
     root = parse_root(raw)
     err = tally_status_error(root)
     if err:
         raise TallyError(f"Tally error for {report_id}: {err}")
     rows = parse_bills_report(root, to_date)
-    print(f"  {len(rows)} open bills")
+    label = "Receivables" if "Receivable" in report_id else "Payables" if "Payable" in report_id else report_id
+    emit_progress(f"{label}:1 [{len(rows)} bills]")
     return rows
 
 

@@ -12,12 +12,11 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    mysql_host: str = "homeserver"
+    mysql_host: str = "homelab"
     mysql_user: str = "sysadmin"
     mysql_password: str = ""
     mysql_database: str = "tallysync"
     mysql_port: int = 3306
-    sqlite_path: str = "app.sqlite"
     superuser_password: str = ""
 
     admin_user: str = "admin"

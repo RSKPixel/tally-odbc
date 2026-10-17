@@ -14,7 +14,17 @@ from sqlalchemy.orm import Session
 from backend.auth import current_user
 from backend.db import get_db
 from backend.mysql import MysqlError
-from backend.mysql_sync import replace_period, replace_pnl, replace_stock_summary
+from backend.mysql_sync import (
+    replace_accounts,
+    replace_cost_centres,
+    replace_daybook,
+    replace_inventory,
+    replace_payables,
+    replace_period,
+    replace_pnl,
+    replace_receivables,
+    replace_stock_summary,
+)
 from backend.models import get_company_database, get_or_create_settings
 from backend.progress import (
     claim_sync,
@@ -26,7 +36,7 @@ from backend.progress import (
     set_status,
     store_result,
 )
-from tallysync import purchase, sales
+from tallysync import payables, purchase, receivables, sales
 from tallysync.tallylib import (
     PURCHASE_LINE_FIELDS,
     PURCHASE_TYPE,
@@ -47,7 +57,11 @@ from tallysync.tallylib import (
     reset_progress,
     tally_date,
     tally_status_error,
+    fetch_accounts,
+    fetch_cost_centres,
+    fetch_daybook,
     fetch_profit_loss_months,
+    fetch_stock_items,
     fetch_stock_summary,
 )
 
@@ -78,6 +92,32 @@ COLLECTIONS = {
         "label": "Stock Summary (tallysync_stocksummary)",
         "table": "tallysync_stocksummary",
     },
+    "inventory": {
+        "label": "Inventory (tallysync_inventory)",
+        "table": "tallysync_inventory",
+    },
+    "accounts": {
+        "label": "Accounts (tallysync_accounts)",
+        "table": "tallysync_accounts",
+    },
+    "costcentres": {
+        "label": "Cost Centres (tallysync_costcentres)",
+        "table": "tallysync_costcentres",
+    },
+    "receivables": {
+        "label": "Receivables (tallysync_receivables)",
+        "table": "tallysync_receivables",
+        "fetch": receivables.fetch,
+    },
+    "payables": {
+        "label": "Payables (tallysync_payables)",
+        "table": "tallysync_payables",
+        "fetch": payables.fetch,
+    },
+    "daybook": {
+        "label": "Daybook (tallysync_daybook)",
+        "table": "tallysync_daybook",
+    },
 }
 
 PNL_FIELDS = ["period_from", "period_to", "line_no", "account", "amount", "amount_side"]
@@ -103,6 +143,100 @@ STOCK_FIELDS = [
     "closing_rate",
     "closing_value",
 ]
+INVENTORY_FIELDS = [
+    "stock_item",
+    "stock_group",
+    "category",
+    "base_unit",
+    "alternate_unit",
+    "conversion",
+    "denominator",
+    "packing",
+    "gst_applicable",
+    "master_id",
+]
+ACCOUNT_FIELDS = [
+    "ledger_name",
+    "account_group",
+    "primary_group",
+    "mailing_name",
+    "address_1",
+    "address_2",
+    "address_3",
+    "address_4",
+    "pin_code",
+    "gstin",
+    "gst_registration_type",
+    "state",
+    "country",
+    "pan",
+    "phone",
+    "mobile",
+    "email",
+    "bill_wise",
+    "favouring_name",
+    "account_number",
+    "bank_code",
+    "bank_name",
+    "representative",
+    "master_id",
+]
+COSTCENTRE_FIELDS = [
+    "cost_centre",
+    "parent",
+    "category",
+    "master_id",
+]
+BILL_DISPLAY_FIELDS = [
+    "as_on",
+    "invoice_no",
+    "invoice_date",
+    "due_date",
+    "overdue_days",
+    "ledger_name",
+    "representative",
+    "amount",
+    "closing",
+]
+DAYBOOK_FIELDS = [
+    "voucher_date",
+    "voucher_type",
+    "voucher_no",
+    "debit_credit",
+    "ledger_name",
+    "ledger_amount",
+    "bill_no",
+    "bill_type",
+    "costcentre_name",
+    "costcentre_amt",
+    "narration",
+]
+
+
+def _count_noun(collection_id: str) -> str:
+    return {
+        "accounts": "accounts",
+        "inventory": "items",
+        "costcentres": "centres",
+        "receivables": "bills",
+        "payables": "bills",
+        "daybook": "lines",
+    }.get(collection_id, "lines")
+
+
+def _bill_display_row(item: dict) -> dict:
+    ledger = "" if item.get("party") is None else str(item.get("party"))
+    return {
+        "as_on": "" if item.get("as_on") is None else str(item.get("as_on")),
+        "invoice_no": "" if item.get("bill_ref") is None else str(item.get("bill_ref")),
+        "invoice_date": "" if item.get("bill_date") is None else str(item.get("bill_date")),
+        "due_date": "" if item.get("due_date") is None else str(item.get("due_date")),
+        "overdue_days": "" if item.get("overdue_days") is None else str(item.get("overdue_days")),
+        "ledger_name": ledger,
+        "representative": "" if item.get("representative") is None else str(item.get("representative")),
+        "amount": "" if item.get("outstanding") is None else str(item.get("outstanding")),
+        "closing": "" if item.get("closing") is None else str(item.get("closing")),
+    }
 
 
 class FetchBody(BaseModel):
@@ -274,7 +408,8 @@ def _fetch_worker(job_id: str) -> None:
                     f"Fetched {row['vouchers']} vouchers, {row['lines']} lines — {row['label']} ({row['elapsed']})",
                 )
             else:
-                publish(job_id, "ok", f"Fetched {row['count']} lines — {row['label']} ({row['elapsed']})")
+                noun = _count_noun(str(row.get("id") or ""))
+                publish(job_id, "ok", f"Fetched {row['count']} {noun} — {row['label']} ({row['elapsed']})")
         labels = " ".join(row["label"] for row in result["results"] if not row.get("error"))
         publish(job_id, "info", "The following collections will be synced:")
         publish(job_id, "info", f"  {labels}")
@@ -317,8 +452,9 @@ def _sync_worker(job_id: str) -> None:
                     f"Setting up {row['label']} ({row['vouchers']} vouchers, {row['lines']} lines) ...",
                 )
             else:
-                publish(job_id, "info", f"Unpacking {row['label']} ({row['count']} lines) ...")
-                publish(job_id, "ok", f"Setting up {row['label']} ({row['count']} lines) ...")
+                noun = _count_noun(str(row.get("id") or ""))
+                publish(job_id, "info", f"Unpacking {row['label']} ({row['count']} {noun}) ...")
+                publish(job_id, "ok", f"Setting up {row['label']} ({row['count']} {noun}) ...")
         publish(job_id, "ok", "done.")
         publish(job_id, "done", "done.")
         set_status(job_id, "done")
@@ -392,6 +528,86 @@ def _perform_fetch(db: Session, body: FetchBody) -> dict:
                         "count": len(rows),
                         "elapsed": elapsed,
                         "columns": list(STOCK_FIELDS),
+                        "rows": rows,
+                        "error": "",
+                    }
+                )
+                continue
+            if name == "inventory":
+                lines = fetch_stock_items(url)
+                elapsed = _elapsed_text(time.perf_counter() - started)
+                rows = [_item_row(line, INVENTORY_FIELDS) for line in lines]
+                results.append(
+                    {
+                        "id": name,
+                        "label": spec["label"],
+                        "count": len(rows),
+                        "elapsed": elapsed,
+                        "columns": list(INVENTORY_FIELDS),
+                        "rows": rows,
+                        "error": "",
+                    }
+                )
+                continue
+            if name == "accounts":
+                lines = fetch_accounts(url)
+                elapsed = _elapsed_text(time.perf_counter() - started)
+                rows = [_item_row(line, ACCOUNT_FIELDS) for line in lines]
+                results.append(
+                    {
+                        "id": name,
+                        "label": spec["label"],
+                        "count": len(rows),
+                        "elapsed": elapsed,
+                        "columns": list(ACCOUNT_FIELDS),
+                        "rows": rows,
+                        "error": "",
+                    }
+                )
+                continue
+            if name == "costcentres":
+                lines = fetch_cost_centres(url)
+                elapsed = _elapsed_text(time.perf_counter() - started)
+                rows = [_item_row(line, COSTCENTRE_FIELDS) for line in lines]
+                results.append(
+                    {
+                        "id": name,
+                        "label": spec["label"],
+                        "count": len(rows),
+                        "elapsed": elapsed,
+                        "columns": list(COSTCENTRE_FIELDS),
+                        "rows": rows,
+                        "error": "",
+                    }
+                )
+                continue
+            if name in {"receivables", "payables"}:
+                lines = spec["fetch"](url, "", from_date, to_date)
+                elapsed = _elapsed_text(time.perf_counter() - started)
+                rows = [_bill_display_row(line) for line in lines]
+                results.append(
+                    {
+                        "id": name,
+                        "label": spec["label"],
+                        "count": len(rows),
+                        "elapsed": elapsed,
+                        "columns": list(BILL_DISPLAY_FIELDS),
+                        "rows": rows,
+                        "error": "",
+                    }
+                )
+                continue
+            if name == "daybook":
+                lines = fetch_daybook(url, "", from_date, to_date)
+                elapsed = _elapsed_text(time.perf_counter() - started)
+                rows = [_item_row(line, DAYBOOK_FIELDS) for line in lines]
+                results.append(
+                    {
+                        "id": name,
+                        "label": spec["label"],
+                        "count": len(rows),
+                        "elapsed": elapsed,
+                        "columns": list(DAYBOOK_FIELDS),
                         "rows": rows,
                         "error": "",
                     }
@@ -494,6 +710,90 @@ def _perform_sync(db: Session, body: FetchBody) -> dict:
             if name == "stocksummary":
                 lines = fetch_stock_summary(url, "", from_date, to_date)
                 count = replace_stock_summary(database, lines, from_date, to_date)
+                elapsed = _elapsed_text(time.perf_counter() - started)
+                results.append(
+                    {
+                        "id": name,
+                        "label": spec["label"],
+                        "count": count,
+                        "elapsed": elapsed,
+                        "error": "",
+                    }
+                )
+                continue
+            if name == "inventory":
+                lines = fetch_stock_items(url)
+                count = replace_inventory(database, lines)
+                elapsed = _elapsed_text(time.perf_counter() - started)
+                results.append(
+                    {
+                        "id": name,
+                        "label": spec["label"],
+                        "count": count,
+                        "elapsed": elapsed,
+                        "error": "",
+                    }
+                )
+                continue
+            if name == "accounts":
+                lines = fetch_accounts(url)
+                count = replace_accounts(database, lines)
+                elapsed = _elapsed_text(time.perf_counter() - started)
+                results.append(
+                    {
+                        "id": name,
+                        "label": spec["label"],
+                        "count": count,
+                        "elapsed": elapsed,
+                        "error": "",
+                    }
+                )
+                continue
+            if name == "costcentres":
+                lines = fetch_cost_centres(url)
+                count = replace_cost_centres(database, lines)
+                elapsed = _elapsed_text(time.perf_counter() - started)
+                results.append(
+                    {
+                        "id": name,
+                        "label": spec["label"],
+                        "count": count,
+                        "elapsed": elapsed,
+                        "error": "",
+                    }
+                )
+                continue
+            if name == "receivables":
+                lines = receivables.fetch(url, "", from_date, to_date)
+                count = replace_receivables(database, lines)
+                elapsed = _elapsed_text(time.perf_counter() - started)
+                results.append(
+                    {
+                        "id": name,
+                        "label": spec["label"],
+                        "count": count,
+                        "elapsed": elapsed,
+                        "error": "",
+                    }
+                )
+                continue
+            if name == "payables":
+                lines = payables.fetch(url, "", from_date, to_date)
+                count = replace_payables(database, lines)
+                elapsed = _elapsed_text(time.perf_counter() - started)
+                results.append(
+                    {
+                        "id": name,
+                        "label": spec["label"],
+                        "count": count,
+                        "elapsed": elapsed,
+                        "error": "",
+                    }
+                )
+                continue
+            if name == "daybook":
+                lines = fetch_daybook(url, "", from_date, to_date)
+                count = replace_daybook(database, lines, from_date, to_date)
                 elapsed = _elapsed_text(time.perf_counter() - started)
                 results.append(
                     {

@@ -14,6 +14,10 @@ class LoginBody(BaseModel):
     password: str
 
 
+class PasswordBody(BaseModel):
+    password: str
+
+
 def current_user(request: Request) -> str:
     user = request.session.get("user")
     if not user:
@@ -40,3 +44,15 @@ def logout(request: Request):
 def me(_user: str = Depends(current_user), db: Session = Depends(get_db)):
     row = get_or_create_profile(db)
     return {"username": row.username, "name": row.name}
+
+
+@router.post("/verify-password")
+def verify_admin_password(
+    body: PasswordBody,
+    _user: str = Depends(current_user),
+    db: Session = Depends(get_db),
+):
+    row = get_or_create_profile(db)
+    if not verify_password(body.password, row.password_hash):
+        raise HTTPException(status_code=403, detail="Invalid admin password")
+    return {"ok": True}

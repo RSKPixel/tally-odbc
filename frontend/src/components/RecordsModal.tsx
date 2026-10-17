@@ -51,8 +51,23 @@ export function RecordsModal({ result, onClose }: Props) {
     }
   }
 
-  if (result.id === "stocksummary") {
+  if (
+    result.id === "stocksummary" ||
+    result.id === "inventory" ||
+    result.id === "accounts" ||
+    result.id === "costcentres" ||
+    result.id === "receivables" ||
+    result.id === "payables" ||
+    result.id === "daybook"
+  ) {
     const numeric = new Set([
+      "amount",
+      "closing",
+      "overdue_days",
+      "ledger_amount",
+      "costcentre_amt",
+      "denominator",
+      "packing",
       "conversion",
       "opening_alt",
       "opening_rate",
@@ -68,15 +83,15 @@ export function RecordsModal({ result, onClose }: Props) {
       "closing_value",
     ]);
     return (
-      <div className="fixed inset-0 z-50 bg-black/70" onClick={onClose}>
+      <div className="fixed inset-0 z-50 overflow-hidden bg-black/70" onClick={onClose}>
         <div
           role="dialog"
           aria-modal="true"
           aria-labelledby="records-title"
-          className="flex h-full w-full flex-col bg-zinc-950"
+          className="flex h-full max-h-full w-full flex-col overflow-hidden bg-zinc-950"
           onClick={(event) => event.stopPropagation()}
         >
-          <div className="flex items-center justify-between border-b border-zinc-800 px-[5%] py-3">
+          <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-[5%] py-3">
             <h2 id="records-title" className="text-sm font-medium text-white">
               {result.label} · {result.count}
             </h2>
@@ -105,7 +120,7 @@ export function RecordsModal({ result, onClose }: Props) {
                 </thead>
                 <tbody>
                   {result.rows.map((row, index) => (
-                    <tr key={`${row.stock_item}-${index}`} className="border-t border-zinc-800">
+                    <tr key={`${row.master_id || row.voucher_no || row.invoice_no || row.ledger_name || row.cost_centre || row.stock_item}-${index}`} className="border-t border-zinc-800">
                       {result.columns.map((column) => (
                         <td
                           key={column}
@@ -139,15 +154,15 @@ export function RecordsModal({ result, onClose }: Props) {
       month.lines.push(row);
     }
     return (
-      <div className="fixed inset-0 z-50 bg-black/70" onClick={onClose}>
+      <div className="fixed inset-0 z-50 overflow-hidden bg-black/70" onClick={onClose}>
         <div
           role="dialog"
           aria-modal="true"
           aria-labelledby="records-title"
-          className="flex h-full w-full flex-col bg-zinc-950"
+          className="flex h-full max-h-full w-full flex-col overflow-hidden bg-zinc-950"
           onClick={(event) => event.stopPropagation()}
         >
-          <div className="flex items-center justify-between border-b border-zinc-800 px-[5%] py-3">
+          <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-[5%] py-3">
             <h2 id="records-title" className="text-sm font-medium text-white">
               {result.label} · {result.count}
             </h2>
@@ -158,11 +173,11 @@ export function RecordsModal({ result, onClose }: Props) {
           {months.length === 0 ? (
             <p className="p-6 text-sm text-zinc-500">No records</p>
           ) : (
-            <div className="grid min-h-0 flex-1 grid-cols-2 content-start gap-4 overflow-hidden p-[5%]">
+            <div className="grid min-h-0 flex-1 grid-cols-2 content-start gap-4 overflow-auto p-[5%]">
               {months.map((month) => (
                 <section
                   key={month.key}
-                  className={`rounded-xl border border-zinc-800 p-3 ${months.length === 1 ? "col-span-2" : ""}`}
+                  className={`min-h-0 overflow-auto rounded-xl border border-zinc-800 p-3 ${months.length === 1 ? "col-span-2" : ""}`}
                 >
                   <h3 className="font-mono text-xs text-zinc-400">
                     {formatDateCell("period_from", month.from)} – {formatDateCell("period_to", month.to)}
@@ -193,15 +208,15 @@ export function RecordsModal({ result, onClose }: Props) {
     }`;
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70" onClick={onClose}>
+    <div className="fixed inset-0 z-50 overflow-hidden bg-black/70" onClick={onClose}>
       <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="records-title"
-        className="flex h-full w-full flex-col overflow-hidden bg-zinc-950"
+        className="flex h-full max-h-full w-full flex-col overflow-hidden bg-zinc-950"
         onClick={(event) => event.stopPropagation()}
       >
-        <div className="flex items-center justify-between border-b border-zinc-800 px-[5%] py-3">
+        <div className="flex shrink-0 items-center justify-between border-b border-zinc-800 px-[5%] py-3">
           <h2 id="records-title" className="text-sm font-medium text-white">
             {result.label} · {result.count}
           </h2>
@@ -209,7 +224,7 @@ export function RecordsModal({ result, onClose }: Props) {
             Close
           </button>
         </div>
-        <div role="tablist" className="flex border-b border-zinc-800 px-[5%]">
+        <div role="tablist" className="flex shrink-0 border-b border-zinc-800 px-[5%]">
           <button type="button" role="tab" aria-selected={tab === "vouchers"} className={tabClass("vouchers")} onClick={() => setTab("vouchers")}>
             Vouchers
           </button>

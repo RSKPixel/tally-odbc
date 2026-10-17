@@ -68,6 +68,11 @@ export const api = {
       body: JSON.stringify({ username, password }),
     }),
   logout: () => request<{ ok: boolean }>("/api/auth/logout", { method: "POST" }),
+  verifyPassword: (password: string) =>
+    request<{ ok: boolean }>("/api/auth/verify-password", {
+      method: "POST",
+      body: JSON.stringify({ password }),
+    }),
   settings: () => request<AppSettings>("/api/settings"),
   saveSettings: (body: AppSettings) =>
     request<AppSettings>("/api/settings", {
