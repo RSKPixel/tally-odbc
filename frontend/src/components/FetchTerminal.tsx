@@ -10,26 +10,78 @@ type RequestBody = {
   full_fetch: boolean;
 };
 
+export type TerminalComplete = {
+  ok: boolean;
+  results: FetchResult[];
+  lines: Line[];
+};
+
 const inflight = new Map<string, Promise<{ job_id: string }>>();
 
 type Props = {
   request: RequestBody;
   onClose: () => void;
   onResults: (results: FetchResult[]) => void;
+  /** Skip the Y/n prompt and sync as soon as fetch finishes. */
+  autoSync?: boolean;
+  /** Close the modal when the job finishes (success or error). */
+  closeOnComplete?: boolean;
+  onComplete?: (report: TerminalComplete) => void;
 };
 
-export function FetchTerminal({ request, onClose, onResults }: Props) {
+export function FetchTerminal({
+  request,
+  onClose,
+  onResults,
+  autoSync = false,
+  closeOnComplete = false,
+  onComplete,
+}: Props) {
   const [lines, setLines] = useState<Line[]>([]);
   const [prompt, setPrompt] = useState(false);
   const [answer, setAnswer] = useState("");
   const [finished, setFinished] = useState(false);
   const jobId = useRef("");
   const scroller = useRef<HTMLDivElement>(null);
+  const linesRef = useRef<Line[]>([]);
+  const completed = useRef(false);
+  const onResultsRef = useRef(onResults);
+  const onCompleteRef = useRef(onComplete);
+  const onCloseRef = useRef(onClose);
+  onResultsRef.current = onResults;
+  onCompleteRef.current = onComplete;
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    linesRef.current = lines;
+  }, [lines]);
 
   useEffect(() => {
     const box = scroller.current;
     if (box) box.scrollTop = box.scrollHeight;
   }, [lines, prompt, finished]);
+
+  useEffect(() => {
+    if (!finished || completed.current) return;
+    completed.current = true;
+    const id = jobId.current;
+    void (async () => {
+      let results: FetchResult[] = [];
+      if (id) {
+        try {
+          const job = await api.job(id);
+          results = job.results || [];
+          onResultsRef.current(results);
+        } catch {
+          /* keep empty */
+        }
+      }
+      const finalLines = linesRef.current;
+      const ok = !finalLines.some((line) => line.kind === "err");
+      onCompleteRef.current?.({ ok, results, lines: finalLines });
+      if (closeOnComplete) onCloseRef.current();
+    })();
+  }, [finished, closeOnComplete]);
 
   useEffect(() => {
     const key = JSON.stringify(request);
@@ -41,7 +93,8 @@ export function FetchTerminal({ request, onClose, onResults }: Props) {
     let source: EventSource | null = null;
     let closed = false;
 
-    promise.then((body) => {
+    promise
+      .then((body) => {
         if (closed) return;
         jobId.current = body.job_id;
         source = new EventSource(`/api/tally/jobs/${body.job_id}/events`);
@@ -55,21 +108,44 @@ export function FetchTerminal({ request, onClose, onResults }: Props) {
             return;
           }
           if (msg.kind === "prompt") {
-            setPrompt(true);
             const id = jobId.current;
             if (id) {
               api
                 .job(id)
                 .then((job) => {
-                  if (!closed && job.results) onResults(job.results);
+                  if (!closed && job.results) onResultsRef.current(job.results);
                 })
                 .catch(() => undefined);
             }
+            if (autoSync) {
+              setLines((prev) => [
+                ...prev,
+                { kind: "info", text: "Do you want to continue? [Y/n] Y" },
+              ]);
+              void api.syncJob(id).catch((err: unknown) => {
+                if (closed) return;
+                setLines((prev) => [
+                  ...prev,
+                  {
+                    kind: "err",
+                    text: `Err ${err instanceof Error ? err.message : "Sync failed"}`,
+                  },
+                ]);
+                setFinished(true);
+              });
+              return;
+            }
+            setPrompt(true);
             return;
           }
           if (msg.kind === "done" || msg.kind === "error") {
             stop = true;
             setPrompt(false);
+            if (msg.kind === "error") {
+              setLines((prev) => [...prev, msg]);
+            } else if (msg.text) {
+              setLines((prev) => [...prev, msg]);
+            }
             setFinished(true);
             source?.close();
             return;
@@ -80,6 +156,7 @@ export function FetchTerminal({ request, onClose, onResults }: Props) {
           if (closed || stop) return;
           stop = true;
           setLines((prev) => [...prev, { kind: "err", text: "Err lost the progress stream" }]);
+          setFinished(true);
           source?.close();
         };
       })
@@ -95,7 +172,7 @@ export function FetchTerminal({ request, onClose, onResults }: Props) {
         if (inflight.get(key) === promise) inflight.delete(key);
       }, 200);
     };
-  }, [request, onResults]);
+  }, [request, autoSync]);
 
   async function confirm(event: FormEvent) {
     event.preventDefault();
@@ -103,7 +180,10 @@ export function FetchTerminal({ request, onClose, onResults }: Props) {
     const yes = typed !== "n" && typed !== "no";
     setAnswer("");
     setPrompt(false);
-    setLines((prev) => [...prev, { kind: "info", text: `Do you want to continue? [Y/n] ${yes ? "Y" : "n"}` }]);
+    setLines((prev) => [
+      ...prev,
+      { kind: "info", text: `Do you want to continue? [Y/n] ${yes ? "Y" : "n"}` },
+    ]);
     if (!yes) {
       setLines((prev) => [...prev, { kind: "info", text: "Abort." }]);
       setFinished(true);
@@ -112,7 +192,10 @@ export function FetchTerminal({ request, onClose, onResults }: Props) {
     try {
       await api.syncJob(jobId.current);
     } catch (err) {
-      setLines((prev) => [...prev, { kind: "err", text: `Err ${err instanceof Error ? err.message : "Sync failed"}` }]);
+      setLines((prev) => [
+        ...prev,
+        { kind: "err", text: `Err ${err instanceof Error ? err.message : "Sync failed"}` },
+      ]);
       setFinished(true);
     }
   }
@@ -133,7 +216,10 @@ export function FetchTerminal({ request, onClose, onResults }: Props) {
             close
           </button>
         </div>
-        <div ref={scroller} className="min-h-0 flex-1 overflow-y-auto px-4 py-3 font-mono text-[13px] leading-6 text-[#EEEEEC]">
+        <div
+          ref={scroller}
+          className="min-h-0 flex-1 overflow-y-auto px-4 py-3 font-mono text-[13px] leading-6 text-[#EEEEEC]"
+        >
           {lines.map((line, index) => (
             <TerminalLine key={`${index}-${line.text}`} line={line} />
           ))}
@@ -152,7 +238,9 @@ export function FetchTerminal({ request, onClose, onResults }: Props) {
               />
             </form>
           ) : null}
-          {!finished ? <span className="ml-0.5 inline-block h-4 w-2 translate-y-0.5 animate-pulse bg-[#EEEEEC]" /> : null}
+          {!finished ? (
+            <span className="ml-0.5 inline-block h-4 w-2 translate-y-0.5 animate-pulse bg-[#EEEEEC]" />
+          ) : null}
         </div>
       </div>
     </div>
@@ -171,6 +259,12 @@ function TerminalLine({ line }: { line: Line }) {
     );
   }
   const color =
-    line.kind === "err" ? "text-[#EF2929]" : line.kind === "hit" || line.kind === "ok" ? "text-[#8AE234]" : line.kind === "ign" ? "text-[#C4A000]" : "text-[#EEEEEC]";
+    line.kind === "err"
+      ? "text-[#EF2929]"
+      : line.kind === "hit" || line.kind === "ok"
+        ? "text-[#8AE234]"
+        : line.kind === "ign"
+          ? "text-[#C4A000]"
+          : "text-[#EEEEEC]";
   return <div className={color}>{line.text}</div>;
 }

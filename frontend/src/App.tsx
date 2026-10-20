@@ -4,6 +4,8 @@ import { api, Me } from "./api";
 import { Layout } from "./components/Layout";
 import { Landing } from "./pages/Landing";
 import { Login } from "./pages/Login";
+import { QsSettings } from "./pages/QsSettings";
+import { QuickSync } from "./pages/QuickSync";
 import { Settings } from "./pages/Settings";
 
 export default function App() {
@@ -40,6 +42,14 @@ export default function App() {
         }
       />
       <Route
+        path="/qs"
+        element={username ? <QuickSync bare /> : <Navigate to="/login" replace />}
+      />
+      <Route
+        path="/qs/settings"
+        element={username ? <QsSettings /> : <Navigate to="/login" replace />}
+      />
+      <Route
         element={
           username ? (
             <Layout
@@ -54,7 +64,8 @@ export default function App() {
           )
         }
       >
-        <Route path="/" element={<Landing />} />
+        <Route path="/" element={<QuickSync />} />
+        <Route path="/advanced" element={<Landing />} />
         <Route path="/settings" element={<Settings onProfileSaved={applyMe} />} />
       </Route>
       <Route path="*" element={<Navigate to={username ? "/" : "/login"} replace />} />

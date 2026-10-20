@@ -112,4 +112,28 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(body),
     }),
+  qsSettings: () =>
+    request<{
+      company: string;
+      database: string;
+      days: number;
+      auto_minutes: number;
+      tally_host: string;
+      tally_port: number;
+      mysql_host: string;
+    }>("/api/qs/settings"),
+  saveQsSettings: (body: {
+    company: string;
+    database: string;
+    days: number;
+    auto_minutes: number;
+    password: string;
+  }) =>
+    request<{ company: string; database: string; days: number; auto_minutes: number }>(
+      "/api/qs/settings",
+      {
+        method: "PUT",
+        body: JSON.stringify(body),
+      },
+    ),
 };

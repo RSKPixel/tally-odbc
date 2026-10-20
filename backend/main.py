@@ -10,6 +10,7 @@ from backend.db import init_engine
 from backend.profile import router as profile_router
 from backend.settings import router as settings_router
 from backend.mysql_binding import router as mysql_router
+from backend.qs_settings import router as qs_router
 from backend.tally_fetch import router as tally_fetch_router
 from backend.tally_status import router as tally_router
 
@@ -29,7 +30,12 @@ app.add_middleware(
 )
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5176", "http://127.0.0.1:5176"],
+    allow_origins=[
+        "http://localhost:5176",
+        "http://127.0.0.1:5176",
+        "http://homeserver:5176",
+        "https://homeserver:5176",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -40,6 +46,7 @@ app.include_router(profile_router)
 app.include_router(tally_router)
 app.include_router(tally_fetch_router)
 app.include_router(mysql_router)
+app.include_router(qs_router)
 
 
 @app.get("/api/health")

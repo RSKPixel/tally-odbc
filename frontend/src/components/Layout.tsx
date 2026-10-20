@@ -102,6 +102,9 @@ export function Layout({ username, onLogout }: Props) {
             <NavLink to="/" className={navClass} end>
               Home
             </NavLink>
+            <NavLink to="/advanced" className={navClass}>
+              Advanced
+            </NavLink>
             <NavLink to="/settings" className={navClass}>
               Settings
             </NavLink>

@@ -56,6 +56,25 @@ def init_engine() -> None:
     )
     SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
     Base.metadata.create_all(bind=engine)
+    with engine.begin() as conn:
+        exists = conn.execute(
+            text(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = 'qs_settings'"
+            )
+        ).first()
+        if exists:
+            cols = {
+                row[0]
+                for row in conn.execute(text("SHOW COLUMNS FROM qs_settings")).fetchall()
+            }
+            if "auto_minutes" not in cols:
+                conn.execute(
+                    text(
+                        "ALTER TABLE qs_settings "
+                        "ADD COLUMN auto_minutes INT NOT NULL DEFAULT 0"
+                    )
+                )
     with SessionLocal() as db:
         get_or_create_settings(db)
         get_or_create_profile(db)

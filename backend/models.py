@@ -35,6 +35,16 @@ class CompanyDatabase(Base):
     mysql_database: Mapped[str] = mapped_column(String(64), default="")
 
 
+class QsSettings(Base):
+    __tablename__ = "qs_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    company: Mapped[str] = mapped_column(String(255), default="")
+    mysql_database: Mapped[str] = mapped_column(String(64), default="")
+    days: Mapped[int] = mapped_column(Integer, default=1)
+    auto_minutes: Mapped[int] = mapped_column(Integer, default=0)
+
+
 def get_or_create_settings(db: Session) -> AppSettings:
     row = db.scalar(select(AppSettings).where(AppSettings.id == 1))
     if row is not None:
@@ -81,3 +91,21 @@ def get_company_database(db: Session, company: str) -> CompanyDatabase | None:
     if not name:
         return None
     return db.scalar(select(CompanyDatabase).where(CompanyDatabase.company == name))
+
+
+def get_or_create_qs_settings(db: Session) -> QsSettings:
+    row = db.scalar(select(QsSettings).where(QsSettings.id == 1))
+    if row is not None:
+        return row
+    row = QsSettings(id=1, company="", mysql_database="", days=1, auto_minutes=0)
+    db.add(row)
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        row = db.scalar(select(QsSettings).where(QsSettings.id == 1))
+        if row is None:
+            raise
+        return row
+    db.refresh(row)
+    return row
