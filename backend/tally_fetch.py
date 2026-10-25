@@ -302,6 +302,13 @@ def _apply_fetch_window(from_date: str, to_date: str, full_fetch: bool, info: di
     return tally_date(start.isoformat()), to_date
 
 
+def _full_books_period(from_date: str, full_fetch: bool, info: dict) -> bool:
+    """Full fetch starting on the books start date (e.g. 1-Apr through To)."""
+    start = parse_row_date(from_date)
+    period_start = parse_row_date(info.get("from_date", ""))
+    return bool(full_fetch and start and period_start and start == period_start)
+
+
 def _in_tally_period(from_date: str, to_date: str, info: dict) -> None:
     start = parse_row_date(from_date)
     end = parse_row_date(to_date)
@@ -554,7 +561,8 @@ def _perform_fetch(db: Session, body: FetchBody) -> dict:
                 )
                 continue
             if name == "stockregister":
-                lines = fetch_stock_register(url, "", from_date, to_date)
+                opening = _full_books_period(from_date, body.full_fetch, info)
+                lines = fetch_stock_register(url, "", from_date, to_date, opening=opening)
                 elapsed = _elapsed_text(time.perf_counter() - started)
                 rows = [_item_row(line, STOCK_REGISTER_FIELDS) for line in lines]
                 results.append(
@@ -758,8 +766,9 @@ def _perform_sync(db: Session, body: FetchBody) -> dict:
                 )
                 continue
             if name == "stockregister":
-                lines = fetch_stock_register(url, "", from_date, to_date)
-                count = replace_stock_register(database, lines, from_date, to_date)
+                opening = _full_books_period(from_date, body.full_fetch, info)
+                lines = fetch_stock_register(url, "", from_date, to_date, opening=opening)
+                count = replace_stock_register(database, lines, from_date, to_date, opening=opening)
                 elapsed = _elapsed_text(time.perf_counter() - started)
                 results.append(
                     {

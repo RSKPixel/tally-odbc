@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from backend.mysql import MysqlError, mysql_connect, valid_database_name
-from tallysync.tallylib import first_number, parse_row_date
+from tallysync.tallylib import OPENING_PARTICULARS, first_number, parse_row_date
 
 SALES_TABLE = "tallysync_sales"
 PURCHASE_TABLE = "tallysync_purchases"
@@ -817,6 +817,10 @@ def _stock_row(item: dict) -> dict:
     }
 
 
+# Opening Balance rows carry no voucher number; voucher lines always do.
+STOCK_OPENING_SQL = "particulars = %s AND voucher_no IS NULL"
+
+
 def _stock_register_row(item: dict) -> dict:
     return {
         "period_from": _when(item.get("period_from")),
@@ -840,8 +844,15 @@ def _stock_register_row(item: dict) -> dict:
     }
 
 
-def replace_stock_register(database: str, rows: list[dict], from_date: str, to_date: str) -> int:
-    """Replace stock register lines for [from_date, to_date]."""
+def replace_stock_register(
+    database: str, rows: list[dict], from_date: str, to_date: str, opening: bool = True
+) -> int:
+    """Replace stock register lines for [from_date, to_date].
+
+    opening=True (full books period): drop every Opening Balance row, then insert
+    the fresh ones with this pull. opening=False: keep Opening Balance rows and
+    replace only voucher lines in the range.
+    """
     if not valid_database_name(database):
         raise MysqlError("Invalid database name")
     start = parse_row_date(from_date)
@@ -859,10 +870,21 @@ def replace_stock_register(database: str, rows: list[dict], from_date: str, to_d
     try:
         with conn.cursor() as cur:
             cur.execute(CREATE_TABLES[STOCK_REGISTER_TABLE])
-            cur.execute(
-                f"DELETE FROM `{STOCK_REGISTER_TABLE}` WHERE voucher_date >= %s AND voucher_date < %s",
-                (start_dt, end_dt),
-            )
+            if opening:
+                cur.execute(
+                    f"DELETE FROM `{STOCK_REGISTER_TABLE}` WHERE {STOCK_OPENING_SQL}",
+                    (OPENING_PARTICULARS,),
+                )
+                cur.execute(
+                    f"DELETE FROM `{STOCK_REGISTER_TABLE}` WHERE voucher_date >= %s AND voucher_date < %s",
+                    (start_dt, end_dt),
+                )
+            else:
+                cur.execute(
+                    f"DELETE FROM `{STOCK_REGISTER_TABLE}` "
+                    f"WHERE voucher_date >= %s AND voucher_date < %s AND NOT ({STOCK_OPENING_SQL})",
+                    (start_dt, end_dt, OPENING_PARTICULARS),
+                )
             values = [[row[name] for name in STOCK_REGISTER_COLUMNS] for row in mapped]
             batch = 500
             for start_at in range(0, len(values), batch):

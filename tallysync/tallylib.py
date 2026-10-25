@@ -1930,6 +1930,9 @@ STOCK_VCH_PARENTS = {
 }
 
 
+OPENING_PARTICULARS = "Opening Balance"
+
+
 def post_stock_vouchers(url: str, item: str, from_date: str, to_date: str) -> bytes:
     # Native Stock Item Register for one item. Not exploded.
     xml = f"""<ENVELOPE>
@@ -2074,11 +2077,20 @@ def _first_day_opening(lines: list[dict]) -> tuple[str, str]:
     return f"{qty_text} {unit}".strip(), "0" if qty == 0 else ""
 
 
-def fetch_stock_register(url: str, company: str, from_date: str, to_date: str) -> list[dict]:
-    """Stock Item Register for every stock item with vouchers in [from_date, to_date]."""
+def fetch_stock_register(
+    url: str, company: str, from_date: str, to_date: str, opening: bool = True
+) -> list[dict]:
+    """Stock Item Register for every stock item with vouchers in [from_date, to_date].
+
+    opening=False skips the Opening Balance rows (partial-period pulls).
+    """
     # Stock Summary hides some items that moved, so walk every stock item master.
     # Summary still supplies opening where it lists the item.
-    summary = {row["stock_item"]: row for row in fetch_stock_summary(url, company, from_date, to_date)}
+    summary = (
+        {row["stock_item"]: row for row in fetch_stock_summary(url, company, from_date, to_date)}
+        if opening
+        else {}
+    )
     masters = fetch_stock_items(url)
     total = len(masters)
     rows: list[dict] = []
@@ -2096,28 +2108,29 @@ def fetch_stock_register(url: str, company: str, from_date: str, to_date: str) -
             continue
         moved += 1
         group = master.get("stock_group", "")
-        item = summary.get(name)
-        if item:
-            opening = item.get("opening", "")
-            opening_value = abs_amount(item["opening_value"]) if item.get("opening_value") else ""
-        else:
-            opening, opening_value = _first_day_opening(lines)
-        rows.append(
-            {
-                "voucher_date": ymd(from_date),
-                "stock_group": group,
-                "stock_item": name,
-                "particulars": "Opening Balance",
-                "voucher_abbr": "",
-                "voucher_no": "",
-                "inwards": opening,
-                "inward_value": opening_value,
-                "outwards": "",
-                "outward_value": "",
-                "closing": "",
-                "closing_value": "",
-            }
-        )
+        if opening:
+            item = summary.get(name)
+            if item:
+                opening_qty = item.get("opening", "")
+                opening_value = abs_amount(item["opening_value"]) if item.get("opening_value") else ""
+            else:
+                opening_qty, opening_value = _first_day_opening(lines)
+            rows.append(
+                {
+                    "voucher_date": ymd(from_date),
+                    "stock_group": group,
+                    "stock_item": name,
+                    "particulars": OPENING_PARTICULARS,
+                    "voucher_abbr": "",
+                    "voucher_no": "",
+                    "inwards": opening_qty,
+                    "inward_value": opening_value,
+                    "outwards": "",
+                    "outward_value": "",
+                    "closing": "",
+                    "closing_value": "",
+                }
+            )
         for line in lines:
             line["stock_group"] = group
             line["stock_item"] = name
