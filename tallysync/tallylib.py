@@ -1911,6 +1911,248 @@ def fetch_stock_summary(url: str, company: str, from_date: str, to_date: str) ->
     return rows
 
 
+# Stock Vouchers shows the parent type abbreviation. Look up the real voucher
+# type name in that parent's date-filtered voucher list.
+STOCK_VCH_PARENTS = {
+    "Sale": "Sales",
+    "Purc": "Purchase",
+    "Stk Jrnl": "Stock Journal",
+    "Mfg Jrnl": "Manufacturing Journal",
+    "Cr Note": "Credit Note",
+    "Dr Note": "Debit Note",
+    "Rcpt Note": "Receipt Note",
+    "Dln Note": "Delivery Note",
+    "Rej In": "Rejections In",
+    "Rej Out": "Rejections Out",
+    "Phys Stk": "Physical Stock",
+    "Mat In": "Material In",
+    "Mat Out": "Material Out",
+}
+
+
+def post_stock_vouchers(url: str, item: str, from_date: str, to_date: str) -> bytes:
+    # Native Stock Item Register for one item. Not exploded.
+    xml = f"""<ENVELOPE>
+  <HEADER>
+    <VERSION>1</VERSION>
+    <TALLYREQUEST>Export</TALLYREQUEST>
+    <TYPE>Data</TYPE>
+    <ID>Stock Vouchers</ID>
+  </HEADER>
+  <BODY>
+    <DESC>
+      <STATICVARIABLES>
+        <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+        <SVFROMDATE>{from_date}</SVFROMDATE>
+        <SVTODATE>{to_date}</SVTODATE>
+        <STOCKITEMNAME>{xml_escape(item)}</STOCKITEMNAME>
+        <EXPLODEFLAG>No</EXPLODEFLAG>
+      </STATICVARIABLES>
+    </DESC>
+  </BODY>
+</ENVELOPE>"""
+    return post_xml(url, xml, timeout=LIST_TIMEOUT)
+
+
+def parse_stock_vouchers(root: ET.Element) -> list[dict]:
+    rows: list[dict] = []
+    current: dict | None = None
+    for el in root.iter():
+        tag = local_name(el.tag)
+        text = (el.text or "").strip()
+        if tag == "DSPVCHDATE":
+            current = {
+                "voucher_date": ymd(text),
+                "particulars": "",
+                "voucher_abbr": "",
+                "voucher_no": "",
+                "inwards": "",
+                "inward_value": "",
+                "outwards": "",
+                "outward_value": "",
+                "closing": "",
+                "closing_value": "",
+            }
+            rows.append(current)
+            continue
+        if current is None:
+            continue
+        if tag == "DSPVCHITEMACCOUNT":
+            current["particulars"] = text
+        elif tag == "DSPVCHTYPE":
+            current["voucher_abbr"] = text
+        elif tag == "DSPEXPLVCHNUMBER":
+            match = re.search(r"No\.\s*:\s*(.*?)\)?$", text)
+            current["voucher_no"] = match.group(1).strip() if match else text
+        elif tag == "DSPVCHINQTY":
+            current["inwards"] = text
+        elif tag == "DSPVCHINAMT":
+            current["inward_value"] = abs_amount(money(text)) if text else ""
+        elif tag == "DSPVCHOUTQTY":
+            current["outwards"] = text
+        elif tag == "DSPVCHNETTOUTAMT":
+            current["outward_value"] = abs_amount(money(text)) if text else ""
+        elif tag == "DSPVCHCLQTY":
+            current["closing"] = text
+        elif tag == "DSPVCHCLAMT":
+            current["closing_value"] = abs_amount(money(text)) if text else ""
+    return rows
+
+
+def _voucher_type_names(
+    url: str, parent: str, from_date: str, to_date: str
+) -> dict[tuple[str, str], list[tuple[str, str]]]:
+    """(yyyy-mm-dd, voucher no) -> [(voucher type name, master id)] for one parent type."""
+    raw = post_native_vouchers(url, "", from_date, to_date, parent, "TallySyncVouchers")
+    root = parse_root(raw)
+    err = tally_status_error(root)
+    if err:
+        raise TallyError(err)
+    names: dict[tuple[str, str], list[tuple[str, str]]] = {}
+    for vch in root.iter():
+        if local_name(vch.tag) != "VOUCHER":
+            continue
+        number = child_text(vch, "VOUCHERNUMBER")
+        vtype = child_text(vch, "VOUCHERTYPENAME")
+        if number and vtype:
+            key = (ymd(child_text(vch, "DATE")), number)
+            names.setdefault(key, []).append((vtype, child_text(vch, "MASTERID")))
+    return names
+
+
+def _voucher_stock_items(url: str, master_id: str) -> set[str]:
+    root = parse_root(post_voucher_object(url, "", master_id))
+    return {
+        (el.text or "").strip()
+        for el in root.iter()
+        if local_name(el.tag) == "STOCKITEMNAME" and (el.text or "").strip()
+    }
+
+
+def _pick_voucher_type(
+    url: str,
+    candidates: list[tuple[str, str]],
+    stock_item: str,
+    particulars: str,
+    items_cache: dict[str, set[str]],
+) -> str:
+    # Same date + number in two child types (e.g. Stock Journal and Production
+    # Journal both No. 1): keep the voucher that holds this stock item and, for
+    # journals, the other item shown in particulars.
+    if len(candidates) == 1:
+        return candidates[0][0]
+    for master_id in {master_id for _vtype, master_id in candidates}:
+        if master_id not in items_cache:
+            try:
+                items_cache[master_id] = _voucher_stock_items(url, master_id)
+            except TallyError:
+                items_cache[master_id] = set()
+    for wanted in ({stock_item, particulars}, {stock_item}):
+        for vtype, master_id in candidates:
+            if wanted <= items_cache[master_id]:
+                return vtype
+    return candidates[0][0]
+
+
+def _first_day_opening(lines: list[dict]) -> tuple[str, str]:
+    """Opening qty = first day's closing - inwards + outwards.
+
+    Outward values are at selling price, so only a zero opening gets a value.
+    """
+    if not lines:
+        return "", ""
+    day = lines[0]["voucher_date"]
+    same = [line for line in lines if line["voucher_date"] == day]
+    closing = next((line for line in reversed(same) if line["closing"]), None)
+    if closing is None:
+        return "", ""
+    qty = float(first_number(closing["closing"]) or 0)
+    qty -= sum(float(first_number(line["inwards"]) or 0) for line in same)
+    qty += sum(float(first_number(line["outwards"]) or 0) for line in same)
+    unit = closing["closing"].split(" ", 1)[1] if " " in closing["closing"] else ""
+    qty_text = str(int(qty)) if qty.is_integer() else f"{qty:.2f}"
+    return f"{qty_text} {unit}".strip(), "0" if qty == 0 else ""
+
+
+def fetch_stock_register(url: str, company: str, from_date: str, to_date: str) -> list[dict]:
+    """Stock Item Register for every stock item with vouchers in [from_date, to_date]."""
+    # Stock Summary hides some items that moved, so walk every stock item master.
+    # Summary still supplies opening where it lists the item.
+    summary = {row["stock_item"]: row for row in fetch_stock_summary(url, company, from_date, to_date)}
+    masters = fetch_stock_items(url)
+    total = len(masters)
+    rows: list[dict] = []
+    moved = 0
+    for index, master in enumerate(masters, start=1):
+        name = master["stock_item"]
+        raw = post_stock_vouchers(url, name, from_date, to_date)
+        root = parse_root(raw)
+        err = tally_status_error(root)
+        if err:
+            raise TallyError(f"Tally error for Stock Vouchers {name}: {err}")
+        lines = parse_stock_vouchers(root)
+        emit_progress(f"Stock Vouchers:{index}/{total} {name} [{len(lines)} lines]")
+        if not lines:
+            continue
+        moved += 1
+        group = master.get("stock_group", "")
+        item = summary.get(name)
+        if item:
+            opening = item.get("opening", "")
+            opening_value = abs_amount(item["opening_value"]) if item.get("opening_value") else ""
+        else:
+            opening, opening_value = _first_day_opening(lines)
+        rows.append(
+            {
+                "voucher_date": ymd(from_date),
+                "stock_group": group,
+                "stock_item": name,
+                "particulars": "Opening Balance",
+                "voucher_abbr": "",
+                "voucher_no": "",
+                "inwards": opening,
+                "inward_value": opening_value,
+                "outwards": "",
+                "outward_value": "",
+                "closing": "",
+                "closing_value": "",
+            }
+        )
+        for line in lines:
+            line["stock_group"] = group
+            line["stock_item"] = name
+            rows.append(line)
+
+    names: dict[tuple[str, str, str], list[tuple[str, str]]] = {}
+    for abbr in sorted({row["voucher_abbr"] for row in rows if row["voucher_abbr"]}):
+        parent = STOCK_VCH_PARENTS.get(abbr)
+        if not parent:
+            continue
+        try:
+            found = _voucher_type_names(url, parent, from_date, to_date)
+        except TallyError as exc:
+            emit_progress(f"Voucher types:{parent} skipped ({exc})")
+            continue
+        for key, vtype in found.items():
+            names[(abbr, *key)] = vtype
+        emit_progress(f"Voucher types:{parent} [{len(found)} vouchers]")
+
+    period_from = ymd(from_date)
+    period_to = ymd(to_date)
+    items_cache: dict[str, set[str]] = {}
+    for line_no, row in enumerate(rows, start=1):
+        abbr = row["voucher_abbr"]
+        candidates = names.get((abbr, row["voucher_date"], row["voucher_no"]))
+        row["voucher_type"] = (
+            _pick_voucher_type(url, candidates, row["stock_item"], row["particulars"], items_cache) if candidates else abbr
+        )
+        row["line_no"] = str(line_no)
+        row["period_from"] = period_from
+        row["period_to"] = period_to
+    emit_progress(f"Stock Register:1 {from_date} .. {to_date} [{len(rows)} lines, {moved} items]")
+    return rows
+
+
 def fetch_profit_loss_months(url: str, company: str, from_date: str, to_date: str) -> list[dict]:
     rows: list[dict] = []
     for frm, to in month_periods(from_date, to_date):

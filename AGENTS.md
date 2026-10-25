@@ -61,13 +61,13 @@ npm install
 Two terminals, repo root for the API:
 
 ```text
-uvicorn backend.main:app --reload --host 0.0.0.0 --port 8005
+uvicorn backend.main:app --reload --host 0.0.0.0 --port 8006
 cd frontend && npm run dev
 ```
 
-- API: `http://127.0.0.1:8005` (`GET /api/health`)
-- UI: `http://127.0.0.1:5175` (Vite `strictPort`; proxies `/api` to port 8005, proxy timeout 300s)
-- CORS allows only `localhost:5175` and `127.0.0.1:5175`
+- API: `http://127.0.0.1:8006` (`GET /api/health`)
+- UI: `http://127.0.0.1:5176` (Vite `strictPort`; proxies `/api` to port 8006, proxy timeout 300s)
+- CORS allows only `localhost:5176` and `127.0.0.1:5176`
 - Sign in with `ADMIN_USER` / `ADMIN_PASSWORD`
 - Home: confirm the loaded company, pick a MySQL database, Save with the superuser password, Fetch, then Sync
 

@@ -23,6 +23,7 @@ from backend.mysql_sync import (
     replace_period,
     replace_pnl,
     replace_receivables,
+    replace_stock_register,
     replace_stock_summary,
 )
 from backend.models import get_company_database, get_or_create_settings
@@ -62,6 +63,7 @@ from tallysync.tallylib import (
     fetch_daybook,
     fetch_profit_loss_months,
     fetch_stock_items,
+    fetch_stock_register,
     fetch_stock_summary,
 )
 
@@ -91,6 +93,10 @@ COLLECTIONS = {
     "stocksummary": {
         "label": "Stock Summary (tallysync_stocksummary)",
         "table": "tallysync_stocksummary",
+    },
+    "stockregister": {
+        "label": "Stock Register (tallysync_stockregister)",
+        "table": "tallysync_stockregister",
     },
     "inventory": {
         "label": "Inventory (tallysync_inventory)",
@@ -141,6 +147,20 @@ STOCK_FIELDS = [
     "closing",
     "closing_alt",
     "closing_rate",
+    "closing_value",
+]
+STOCK_REGISTER_FIELDS = [
+    "voucher_date",
+    "stock_group",
+    "stock_item",
+    "particulars",
+    "voucher_type",
+    "voucher_no",
+    "inwards",
+    "inward_value",
+    "outwards",
+    "outward_value",
+    "closing",
     "closing_value",
 ]
 INVENTORY_FIELDS = [
@@ -533,6 +553,22 @@ def _perform_fetch(db: Session, body: FetchBody) -> dict:
                     }
                 )
                 continue
+            if name == "stockregister":
+                lines = fetch_stock_register(url, "", from_date, to_date)
+                elapsed = _elapsed_text(time.perf_counter() - started)
+                rows = [_item_row(line, STOCK_REGISTER_FIELDS) for line in lines]
+                results.append(
+                    {
+                        "id": name,
+                        "label": spec["label"],
+                        "count": len(rows),
+                        "elapsed": elapsed,
+                        "columns": list(STOCK_REGISTER_FIELDS),
+                        "rows": rows,
+                        "error": "",
+                    }
+                )
+                continue
             if name == "inventory":
                 lines = fetch_stock_items(url)
                 elapsed = _elapsed_text(time.perf_counter() - started)
@@ -710,6 +746,20 @@ def _perform_sync(db: Session, body: FetchBody) -> dict:
             if name == "stocksummary":
                 lines = fetch_stock_summary(url, "", from_date, to_date)
                 count = replace_stock_summary(database, lines, from_date, to_date)
+                elapsed = _elapsed_text(time.perf_counter() - started)
+                results.append(
+                    {
+                        "id": name,
+                        "label": spec["label"],
+                        "count": count,
+                        "elapsed": elapsed,
+                        "error": "",
+                    }
+                )
+                continue
+            if name == "stockregister":
+                lines = fetch_stock_register(url, "", from_date, to_date)
+                count = replace_stock_register(database, lines, from_date, to_date)
                 elapsed = _elapsed_text(time.perf_counter() - started)
                 results.append(
                     {

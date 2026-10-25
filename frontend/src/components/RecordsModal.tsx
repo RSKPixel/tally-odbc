@@ -57,6 +57,7 @@ export function RecordsModal({ result, onClose }: Props) {
 
   if (
     result.id === "stocksummary" ||
+    result.id === "stockregister" ||
     result.id === "inventory" ||
     result.id === "accounts" ||
     result.id === "costcentres" ||

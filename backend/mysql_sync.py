@@ -3,12 +3,13 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from backend.mysql import MysqlError, mysql_connect, valid_database_name
-from tallysync.tallylib import parse_row_date
+from tallysync.tallylib import first_number, parse_row_date
 
 SALES_TABLE = "tallysync_sales"
 PURCHASE_TABLE = "tallysync_purchases"
 PNL_TABLE = "tallysync_pnl"
 STOCK_TABLE = "tallysync_stocksummary"
+STOCK_REGISTER_TABLE = "tallysync_stockregister"
 INVENTORY_TABLE = "tallysync_inventory"
 ACCOUNT_TABLE = "tallysync_accounts"
 COSTCENTRE_TABLE = "tallysync_costcentres"
@@ -109,6 +110,26 @@ STOCK_COLUMNS = [
     "closing",
     "closing_alt",
     "closing_rate",
+    "closing_value",
+]
+STOCK_REGISTER_COLUMNS = [
+    "period_from",
+    "period_to",
+    "line_no",
+    "voucher_date",
+    "stock_group",
+    "stock_item",
+    "particulars",
+    "voucher_type",
+    "voucher_no",
+    "inwards",
+    "inward_qty",
+    "inward_value",
+    "outwards",
+    "outward_qty",
+    "outward_value",
+    "closing",
+    "closing_qty",
     "closing_value",
 ]
 PNL_COLUMNS = [
@@ -239,6 +260,30 @@ CREATE TABLE IF NOT EXISTS `tallysync_stocksummary` (
   `closing` text,
   `closing_alt` double DEFAULT NULL,
   `closing_rate` double DEFAULT NULL,
+  `closing_value` double DEFAULT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+""",
+    STOCK_REGISTER_TABLE: """
+CREATE TABLE IF NOT EXISTS `tallysync_stockregister` (
+  `id` bigint NOT NULL AUTO_INCREMENT,
+  `period_from` datetime DEFAULT NULL,
+  `period_to` datetime DEFAULT NULL,
+  `line_no` double DEFAULT NULL,
+  `voucher_date` datetime DEFAULT NULL,
+  `stock_group` text,
+  `stock_item` text,
+  `particulars` text,
+  `voucher_type` text,
+  `voucher_no` text,
+  `inwards` text,
+  `inward_qty` double DEFAULT NULL,
+  `inward_value` double DEFAULT NULL,
+  `outwards` text,
+  `outward_qty` double DEFAULT NULL,
+  `outward_value` double DEFAULT NULL,
+  `closing` text,
+  `closing_qty` double DEFAULT NULL,
   `closing_value` double DEFAULT NULL,
   PRIMARY KEY (`id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -770,6 +815,68 @@ def _stock_row(item: dict) -> dict:
         "closing_rate": _number(item.get("closing_rate")),
         "closing_value": _number(item.get("closing_value")),
     }
+
+
+def _stock_register_row(item: dict) -> dict:
+    return {
+        "period_from": _when(item.get("period_from")),
+        "period_to": _when(item.get("period_to")),
+        "line_no": _number(item.get("line_no")),
+        "voucher_date": _when(item.get("voucher_date")),
+        "stock_group": _text(item.get("stock_group")),
+        "stock_item": _text(item.get("stock_item")),
+        "particulars": _text(item.get("particulars")),
+        "voucher_type": _text(item.get("voucher_type")),
+        "voucher_no": _text(item.get("voucher_no")),
+        "inwards": _text(item.get("inwards")),
+        "inward_qty": _number(first_number(item.get("inwards") or "")),
+        "inward_value": _number(item.get("inward_value")),
+        "outwards": _text(item.get("outwards")),
+        "outward_qty": _number(first_number(item.get("outwards") or "")),
+        "outward_value": _number(item.get("outward_value")),
+        "closing": _text(item.get("closing")),
+        "closing_qty": _number(first_number(item.get("closing") or "")),
+        "closing_value": _number(item.get("closing_value")),
+    }
+
+
+def replace_stock_register(database: str, rows: list[dict], from_date: str, to_date: str) -> int:
+    """Replace stock register lines for [from_date, to_date]."""
+    if not valid_database_name(database):
+        raise MysqlError("Invalid database name")
+    start = parse_row_date(from_date)
+    end = parse_row_date(to_date)
+    if start is None or end is None:
+        raise MysqlError("Invalid sync dates")
+    start_dt = datetime(start.year, start.month, start.day)
+    end_dt = datetime(end.year, end.month, end.day) + timedelta(days=1)
+    mapped = [_stock_register_row(item) for item in rows]
+    placeholders = ", ".join(["%s"] * len(STOCK_REGISTER_COLUMNS))
+    column_sql = ", ".join(STOCK_REGISTER_COLUMNS)
+    insert_sql = f"INSERT INTO `{STOCK_REGISTER_TABLE}` ({column_sql}) VALUES ({placeholders})"
+
+    conn = mysql_connect(database)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(CREATE_TABLES[STOCK_REGISTER_TABLE])
+            cur.execute(
+                f"DELETE FROM `{STOCK_REGISTER_TABLE}` WHERE voucher_date >= %s AND voucher_date < %s",
+                (start_dt, end_dt),
+            )
+            values = [[row[name] for name in STOCK_REGISTER_COLUMNS] for row in mapped]
+            batch = 500
+            for start_at in range(0, len(values), batch):
+                cur.executemany(insert_sql, values[start_at : start_at + batch])
+        conn.commit()
+    except MysqlError:
+        conn.rollback()
+        raise
+    except Exception as exc:
+        conn.rollback()
+        raise MysqlError(str(exc)) from exc
+    finally:
+        conn.close()
+    return len(mapped)
 
 
 def replace_stock_summary(database: str, rows: list[dict], from_date: str, to_date: str) -> int:
