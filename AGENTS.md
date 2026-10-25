@@ -130,6 +130,23 @@ Empty strings become SQL NULL. Numbers are `double`. `cartage` stays text.
 
 Fetch preview columns (`VOUCHER_DISPLAY_FIELDS`): `elapsed`, `voucher_date`, `voucher_no`, `ledger_name`, `broker`, `voucher_type`, `master_id`. Item modal columns are `SALES_LINE_FIELDS` / `PURCHASE_LINE_FIELDS` in `tallysync/tallylib.py`.
 
+### Stock register (`stockregister` → `tallysync_stockregister`)
+
+`fetch_stock_register()` in `tallysync/tallylib.py`; `replace_stock_register()` in `backend/mysql_sync.py`.
+
+- Native report `Stock Vouchers` (`TYPE Data`, `STOCKITEMNAME`, `SVFROMDATE`/`SVTODATE`, `EXPLODEFLAG` No), **one POST per stock item master** (Stock Summary hides some items that moved). Items with no lines are skipped. One item's Tally error aborts the collection.
+- Report gives a short voucher type (`Sale`, `Purc`, `Stk Jrnl`…). `STOCK_VCH_PARENTS` maps it to the parent type; the normal date-filtered `TallySyncVouchers` list for that parent resolves the real type name by (date, voucher no). Same date+number in two child types: load each object and keep the one holding this stock item (and the journal's other item).
+- Columns: `period_from`, `period_to`, `line_no`, `voucher_date`, `stock_group`, `stock_item`, `particulars`, `voucher_type`, `voucher_no`, `inwards`/`outwards`/`closing` (Tally text, e.g. `10 BAGS`) plus numeric `inward_qty`/`outward_qty`/`closing_qty` and the `_value` columns.
+
+**Opening Balance rows** (`particulars = 'Opening Balance'` and `voucher_no IS NULL`, one per item, dated on From):
+
+| Sync | Opening rows | MySQL |
+|---|---|---|
+| Full books period: `full_fetch` and From == books start (1-Apr), any To | Added. Qty/value from Stock Summary; else first day's closing − inwards + outwards (value only when that is 0) | Delete **all** opening rows, delete rows in [From, To], insert |
+| Anything else | Not added; Stock Summary not fetched | Delete only voucher lines in [From, To]; existing opening rows kept |
+
+Fetch preview follows the same rule (`_full_books_period` in `backend/tally_fetch.py`). The UI always sends `full_fetch: true`, so in practice From == books start decides. Opening rows are refreshed only by a 1-Apr sync. On 25 Oct 2026 eight duplicate 23-Oct opening rows (from an older partial sync) were deleted from `yoradm`; each item now has one opening row dated 1-Apr.
+
 ## API
 
 Session cookie via Starlette `SessionMiddleware` (`same_site=lax`). Every route except login, logout, and `/api/health` requires the session.
@@ -361,7 +378,7 @@ Old dumps under `out/` (`daybook.raw.xml` ~95 MB, `purchases.raw.xml`) came from
 2. Optional stock-item join for `sivendhikgs` if voucher UDF / bags=kgs derive is missing on a company.
 3. Scheduler (Task Scheduler, 1–5 min, today + yesterday) only after MySQL is stable.
 4. Screens that **read** `tallysync_sales` / `tallysync_purchases`. Home still previews from Tally, not from MySQL.
-5. Do not expand voucher types, add TDL collections, or fetch stock-item masters on every sync unless asked.
+5. Do not expand voucher types, add TDL collections, or fetch stock-item masters on every sync unless asked. (Exception: the stock register walks every stock item by design.)
 
 ## Code map
 
@@ -385,5 +402,5 @@ Old dumps under `out/` (`daybook.raw.xml` ~95 MB, `purchases.raw.xml`) came from
 | `backend/tally_fetch.py` | collections, fetch, voucher, sync |
 | `backend/mysql.py` | PyMySQL connect, `SHOW DATABASES`, superuser check |
 | `backend/mysql_binding.py` | company → database |
-| `backend/mysql_sync.py` | create/replace `tallysync_sales` and `tallysync_purchases` |
+| `backend/mysql_sync.py` | create/replace `tallysync_sales`, `tallysync_purchases`, `tallysync_stockregister` and the other `tallysync_*` tables |
 | `frontend/` | Vite React Tailwind. Pages: `Login`, `Landing`, `Settings`. `FetchCard` + `RecordsModal` |
